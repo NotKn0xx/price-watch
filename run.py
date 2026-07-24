@@ -26,8 +26,6 @@ from detector import check_anomaly, check_category_outlier
 from notifier import send_alert
 from solotodo import best_entity_for_alert, browse_category
 
-STORE_URL_BASE = "https://www.solotodo.cl/products/"
-
 
 def run_once():
     init_db()
@@ -63,8 +61,12 @@ def run_once():
 
                     if reason and not was_recently_alerted(conn, product["product_id"]):
                         entity = best_entity_for_alert(product["product_id"], STORE_IDS.keys())
-                        store_name = STORE_IDS.get(entity["store_id"], "?") if entity else "?"
-                        url = entity["external_url"] if entity else f"{STORE_URL_BASE}{product['product_id']}"
+                        if entity is None:
+                            # Sin registro de precio activo en las tiendas filtradas: no es
+                            # una oferta comprable ahora mismo, no vale la pena alertar.
+                            continue
+                        store_name = STORE_IDS.get(entity["store_id"], "?")
+                        url = entity["external_url"]
                         msg = (
                             f"Posible falla de precio [{category_name}]\n"
                             f"{product['name']}\n"

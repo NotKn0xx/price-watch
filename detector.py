@@ -49,6 +49,11 @@ def check_category_outlier(product: dict, sorted_category_prices: list) -> str:
     cutoff_idx = max(0, int(n * CATEGORY_OUTLIER_PERCENTILE) - 1)
     cutoff_price = sorted_category_prices[cutoff_idx]
     if price <= cutoff_price:
-        return f"Precio en el percentil mas bajo de la categoria ({_clp(price)}, {n} productos comparados)"
+        baseline = median(sorted_category_prices)
+        return (
+            f"Precio en el percentil mas bajo de la categoria "
+            f"(precio normal referencial {_clp(baseline)} vs {_clp(price)} encontrado, "
+            f"{n} productos comparados)"
+        )
 
     return None
