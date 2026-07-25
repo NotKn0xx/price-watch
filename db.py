@@ -1,8 +1,9 @@
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "price_watch.db"
+DB_PATH = Path(__file__).parent / os.environ.get("DB_PATH", "price_watch.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS products (

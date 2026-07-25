@@ -11,16 +11,19 @@ import requests
 BASE_URL = "https://publicapi.solotodo.com"
 
 
-def browse_category(category_id, store_ids, page_size=100, max_pages=5, timeout=20):
+def browse_category(category_id, store_ids, brand_id=None, page_size=100, max_pages=5, timeout=20):
     """Itera productos de una categoria, restringidos a store_ids.
 
     El precio devuelto es el mas bajo en CLP entre las tiendas filtradas.
+    Si se pasa brand_id, restringe ademas a esa marca (ej. Apple, Samsung).
     """
     page = 1
     seen = 0
     while page <= max_pages:
         params = [("categories", category_id)]
         params += [("stores", s) for s in store_ids]
+        if brand_id:
+            params.append(("brands", brand_id))
         params += [("page", page), ("page_size", page_size)]
         resp = requests.get(f"{BASE_URL}/products/browse/", params=params, timeout=timeout)
         resp.raise_for_status()

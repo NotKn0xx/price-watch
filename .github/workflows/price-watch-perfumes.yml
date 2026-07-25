@@ -1,4 +1,4 @@
-name: Price watch
+name: Price watch - Perfumes
 
 on:
   schedule:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: price-watch-run
+  group: price-watch-perfumes-run
   cancel-in-progress: false
 
 jobs:
@@ -26,6 +26,8 @@ jobs:
 
       - run: python run.py
         env:
+          PROFILE: perfumes
+          DB_PATH: price_watch_perfumes.db
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -33,6 +35,6 @@ jobs:
         run: |
           git config user.name "price-watch-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add price_watch.db
-          git diff --cached --quiet || git commit -m "Actualiza historial de precios"
+          git add price_watch_perfumes.db
+          git diff --cached --quiet || git commit -m "Actualiza historial de precios [perfumes]"
           git push
