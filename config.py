@@ -18,8 +18,3 @@ STORE_IDS = {
 MAX_PAGES_PER_CATEGORY = 3
 PAGE_SIZE = 100
 REQUEST_DELAY_SECONDS = 1.0
-
-# Categorias donde aplica la deteccion de precio en el percentil mas bajo (sin historial).
-# Solo perfumes: en categorias mas homogeneas como notebooks o celulares, el producto
-# mas barato no es necesariamente un error de precio, solo genera ruido.
-CATEGORY_OUTLIER_IDS = {780}

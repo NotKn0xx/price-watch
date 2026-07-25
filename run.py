@@ -5,14 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import (
-    CATEGORIES,
-    CATEGORY_OUTLIER_IDS,
-    MAX_PAGES_PER_CATEGORY,
-    PAGE_SIZE,
-    REQUEST_DELAY_SECONDS,
-    STORE_IDS,
-)
+from config import CATEGORIES, MAX_PAGES_PER_CATEGORY, PAGE_SIZE, REQUEST_DELAY_SECONDS, STORE_IDS
 from db import (
     get_conn,
     get_price_history,
@@ -22,7 +15,7 @@ from db import (
     upsert_product,
     was_recently_alerted,
 )
-from detector import check_anomaly, check_category_outlier
+from detector import check_anomaly
 from notifier import send_alert
 from solotodo import best_entity_for_alert, browse_category
 
@@ -33,28 +26,17 @@ def run_once():
         for category_id, category_name in CATEGORIES.items():
             print(f"Escaneando categoria '{category_name}'...")
             try:
-                products = list(
-                    browse_category(
-                        category_id,
-                        STORE_IDS.keys(),
-                        page_size=PAGE_SIZE,
-                        max_pages=MAX_PAGES_PER_CATEGORY,
-                    )
-                )
-                category_prices = (
-                    sorted(p["price"] for p in products if p["price"])
-                    if category_id in CATEGORY_OUTLIER_IDS
-                    else []
-                )
-
-                for product in products:
+                for product in browse_category(
+                    category_id,
+                    STORE_IDS.keys(),
+                    page_size=PAGE_SIZE,
+                    max_pages=MAX_PAGES_PER_CATEGORY,
+                ):
                     if product["price"] is None:
                         continue
 
                     history = get_price_history(conn, product["product_id"])
                     reason = check_anomaly(product, history)
-                    if not reason and category_id in CATEGORY_OUTLIER_IDS:
-                        reason = check_category_outlier(product, category_prices)
 
                     upsert_product(conn, product)
                     insert_price(conn, product)
