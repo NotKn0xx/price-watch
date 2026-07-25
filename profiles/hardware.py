@@ -28,7 +28,15 @@ REQUEST_DELAY_SECONDS = 0.3
 # Mouse y teclados de $5.000 generan puro ruido.
 MIN_PRICE_CLP = 20000
 
-MAX_ALERTS_PER_RUN = 10
+# Umbral mas sensible que en perfumes, y con razon medida: estas tiendas
+# tienen mucha menos dispersion entre si (SSD 10% mediana / 21% p90 / 31%
+# maximo; monitores 5% / 12% / 13%) y practicamente no usan el truco del
+# "precio normal" inflado: 0% del catalogo aparece con >=20% de descuento
+# declarado. Una caida del 40% aca ya es anomala de verdad.
+ALERT_MAX_RATIO = 0.60
+
+MAX_ALERTS_PER_RUN = 5
+MAX_ALERTS_PER_DAY = 20
 ALERT_COOLDOWN_HOURS = 24
 REALERT_ON_EXTRA_DROP = 0.10
 HISTORY_WINDOW_DAYS = 30

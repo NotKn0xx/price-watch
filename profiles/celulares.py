@@ -18,7 +18,14 @@ REQUEST_DELAY_SECONDS = 0.3
 
 MIN_PRICE_CLP = 50000
 
-MAX_ALERTS_PER_RUN = 10
+# Dispersion medida entre tiendas: 14% mediana / 33% p90 / 37% maximo. El
+# umbral del 50% deja margen sobre ese maximo, que es lo que importa porque
+# el precio que seguimos es el minimo entre tiendas y un quiebre de stock
+# lo mueve dentro de ese rango.
+ALERT_MAX_RATIO = 0.50
+
+MAX_ALERTS_PER_RUN = 5
+MAX_ALERTS_PER_DAY = 20
 ALERT_COOLDOWN_HOURS = 24
 REALERT_ON_EXTRA_DROP = 0.10
 HISTORY_WINDOW_DAYS = 30

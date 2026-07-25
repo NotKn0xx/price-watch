@@ -8,17 +8,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from db import (
+    count_alerts_since,
     flush_prices,
     get_conn,
     init_db,
-    load_open_segments,
     load_recent_alerts,
     load_segments,
     prune_history,
     record_alert,
     upsert_products,
 )
-from detector import check_anomaly
+from detector import check_anomaly, has_mature_history, utcnow
 from notifier import send_alert
 from solotodo import best_entity_for_alert, browse_category
 
@@ -26,18 +26,21 @@ PROFILE = os.environ.get("PROFILE", "perfumes")
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 profile = importlib.import_module(f"profiles.{PROFILE}")
 
+SOLOTODO_PRODUCT_URL = "https://www.solotodo.cl/products/{}"
+
 
 def _cfg(name, default):
     return getattr(profile, name, default)
 
 
 def scan_category(conn, target, store_ids):
-    category_id = target["id"]
+    """Escanea una categoria, persiste precios y devuelve (candidatos, stats)."""
     category_name = target["name"]
+    now = utcnow()
 
     products = list(
         browse_category(
-            category_id,
+            target["id"],
             store_ids,
             db_brand_id=target.get("db_brand_id"),
             page_size=_cfg("PAGE_SIZE", 100),
@@ -45,104 +48,167 @@ def scan_category(conn, target, store_ids):
             page_delay=_cfg("REQUEST_DELAY_SECONDS", 0.3),
         )
     )
+    stats = {"categoria": category_name, "productos": 0, "con_historia": 0, "cambios": 0, "candidatos": 0}
     if not products:
-        print(f"  sin resultados en '{category_name}'")
-        return []
+        return [], stats
 
     ids = [p["product_id"] for p in products]
 
-    # Todo el estado de la categoria en 3 queries, en vez de una por producto.
-    segments = load_segments(conn, ids, window_days=_cfg("HISTORY_WINDOW_DAYS", 30))
-    open_segments = load_open_segments(conn, ids)
+    # Todo el estado de la categoria en 2 queries, en vez de una por producto.
+    segments = load_segments(conn, ids)
     recent_alerts = load_recent_alerts(conn, ids, within_hours=_cfg("ALERT_COOLDOWN_HOURS", 24))
 
     min_price = _cfg("MIN_PRICE_CLP", 0)
+    max_ratio = _cfg("ALERT_MAX_RATIO", 0.50)
+    window_days = _cfg("HISTORY_WINDOW_DAYS", 30)
     redrop = _cfg("REALERT_ON_EXTRA_DROP", 0.10)
     candidates = []
 
     for product in products:
-        finding = check_anomaly(product, segments.get(product["product_id"], []), min_price)
+        segs = segments.get(product["product_id"], [])
+        if has_mature_history(segs, now):
+            stats["con_historia"] += 1
+
+        finding = check_anomaly(
+            product, segs, min_price=min_price, alert_max_ratio=max_ratio,
+            window_days=window_days, now=now,
+        )
         if not finding:
             continue
+
         already = recent_alerts.get(product["product_id"])
         # Reabrimos la alerta si el precio siguio bajando de forma relevante;
-        # antes un cooldown de 24h fijas se comia justamente la mejor caida.
+        # un cooldown de 24h fijas se comeria justamente la mejor caida.
         if already is not None and product["price"] > already * (1 - redrop):
             continue
-        candidates.append((finding["ratio"], product, finding))
+        candidates.append((product, finding, category_name))
 
     upsert_products(conn, products)
-    extended, inserted = flush_prices(
-        conn, open_segments, [(p["product_id"], p["price"]) for p in products]
-    )
-    print(
-        f"  {len(products)} productos | tramos: {extended} sin cambio, "
-        f"{inserted} nuevos | {len(candidates)} candidatos"
-    )
+    _, changed = flush_prices(conn, segments, [(p["product_id"], p["price"]) for p in products])
 
-    candidates.sort(key=lambda c: c[0])  # ratio mas bajo = caida mas fuerte
-    return [(p, f, category_name) for _, p, f in candidates]
+    stats.update(productos=len(products), cambios=changed, candidatos=len(candidates))
+    return candidates, stats
+
+
+def build_message(product, finding, entity, store_name, category_name):
+    price = f"${product['price']:,.0f}".replace(",", ".")
+    return (
+        f"[{category_name}] posible falla de precio\n"
+        f"{product['name']}\n\n"
+        f"{price} en {store_name}\n"
+        f"{finding['reason']}\n\n"
+        f"Comprar: {entity['external_url']}\n"
+        f"Comparar: {SOLOTODO_PRODUCT_URL.format(product['product_id'])}"
+    )
 
 
 def run_once():
     init_db()
     store_ids = list(profile.STORE_IDS.keys())
-    max_alerts = _cfg("MAX_ALERTS_PER_RUN", 10)
     started = time.time()
-    all_candidates = []
+    all_stats, candidates, errores = [], [], []
 
+    # --- Fase 1: escanear y persistir. Se commitea al salir del `with`, o sea
+    # ANTES de tocar Telegram: una caida de Telegram ya no puede hacernos
+    # perder el historial recolectado en esta corrida.
     with get_conn() as conn:
         for target in profile.CATEGORIES:
-            print(f"Escaneando categoria '{target['name']}'...")
+            print(f"Escaneando '{target['name']}'...")
             try:
-                all_candidates += scan_category(conn, target, store_ids)
-            except Exception:
-                print(f"  Error en categoria '{target['name']}':")
+                found, stats = scan_category(conn, target, store_ids)
+                candidates += found
+                all_stats.append(stats)
+                print(
+                    f"  {stats['productos']} productos | {stats['con_historia']} con historia "
+                    f"| {stats['cambios']} cambios de precio | {stats['candidatos']} candidatos"
+                )
+            except Exception as exc:
+                errores.append(f"{target['name']}: {exc}")
+                print(f"  Error en '{target['name']}':")
                 traceback.print_exc()
+        prune_history(conn, keep_days=_cfg("KEEP_HISTORY_DAYS", 90))
 
-        all_candidates.sort(key=lambda c: c[1]["ratio"])
-        sent = 0
+    # --- Fase 2: alertar. Transaccion aparte y commit por alerta.
+    candidates.sort(key=lambda c: c[1]["ratio"])  # ratio mas bajo = caida mas fuerte
+    enviadas, descartadas = 0, 0
 
-        for product, finding, category_name in all_candidates:
-            if sent >= max_alerts:
-                print(f"  (tope de {max_alerts} alertas por corrida alcanzado)")
+    with get_conn() as conn:
+        presupuesto = _cfg("MAX_ALERTS_PER_DAY", 40) - count_alerts_since(conn, 24)
+        cupo = min(_cfg("MAX_ALERTS_PER_RUN", 5), max(presupuesto, 0))
+        if candidates and cupo <= 0:
+            print(f"  Presupuesto diario de alertas agotado ({_cfg('MAX_ALERTS_PER_DAY', 40)})")
+
+        max_chequeos = _cfg("MAX_ALERT_CHECKS_PER_RUN", 25)
+        for chequeos, (product, finding, category_name) in enumerate(candidates):
+            if enviadas >= cupo or chequeos >= max_chequeos:
                 break
 
             entity = best_entity_for_alert(product["product_id"], store_ids)
             if entity is None:
-                # Sin registro de precio activo y disponible en las tiendas
-                # filtradas: no es una oferta comprable ahora mismo.
+                # browse lista productos sin ninguna entidad disponible (~7%
+                # de la muestra): no es una oferta comprable ahora mismo.
+                descartadas += 1
                 continue
 
             store_name = profile.STORE_IDS.get(entity["store_id"], "?")
-            url = entity["external_url"]
-            msg = (
-                f"Posible falla de precio [{category_name}]\n"
-                f"{product['name']}\n"
-                f"{finding['reason']}\n"
-                f"Tienda: {store_name}\n"
-                f"{url}"
-            )
+            msg = build_message(product, finding, entity, store_name, category_name)
 
             if DRY_RUN:
                 print("  [DRY RUN]", msg.replace("\n", " | "))
-            else:
-                send_alert(msg)
+                enviadas += 1
+                continue
+
+            if send_alert(msg):
                 record_alert(
-                    conn,
-                    product["product_id"],
-                    product["price"],
-                    finding["reason"],
-                    entity["store_id"],
-                    url,
+                    conn, product["product_id"], product["price"],
+                    finding["reason"], entity["store_id"], entity["external_url"],
                 )
+                conn.commit()  # cada alerta queda registrada apenas sale
+                enviadas += 1
                 print("  ALERTA:", product["name"])
-            sent += 1
+            else:
+                # No la registramos: si fue un fallo transitorio, la proxima
+                # corrida vuelve a intentarlo.
+                print("  (no se pudo enviar, se reintenta en la proxima corrida)")
 
-        if not DRY_RUN:
-            prune_history(conn, keep_days=_cfg("KEEP_HISTORY_DAYS", 90))
+    duracion = time.time() - started
+    print(f"Listo en {duracion:.1f}s | {enviadas} alertas | {descartadas} sin stock")
+    _write_summary(all_stats, enviadas, descartadas, errores, duracion)
+    return enviadas
 
-    print(f"Listo en {time.time() - started:.1f}s | {sent if not DRY_RUN else 0} alertas enviadas")
+
+def _write_summary(all_stats, enviadas, descartadas, errores, duracion):
+    """Resumen al panel de la corrida en GitHub Actions.
+
+    Sin esto una corrida exitosa sin cambios de precio no deja ninguna huella
+    (justamente porque no commitea), y se vuelve indistinguible de un workflow
+    que nunca corrio.
+    """
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lineas = [
+        f"## {PROFILE}",
+        "",
+        "| Categoria | Productos | Con historia | Cambios | Candidatos |",
+        "|---|--:|--:|--:|--:|",
+    ]
+    for s in all_stats:
+        lineas.append(
+            f"| {s['categoria']} | {s['productos']} | {s['con_historia']} "
+            f"| {s['cambios']} | {s['candidatos']} |"
+        )
+    lineas += ["", f"**{enviadas} alertas enviadas** en {duracion:.1f}s."]
+    if descartadas:
+        lineas.append(f" {descartadas} candidatos descartados por falta de stock.")
+    if errores:
+        lineas += ["", "### Errores", *(f"- {e}" for e in errores)]
+    lineas.append("")
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lineas) + "\n")
+    except OSError as exc:
+        print(f"  (no se pudo escribir el resumen: {exc})")
 
 
 if __name__ == "__main__":

@@ -1,34 +1,41 @@
-from datetime import datetime, timezone
+"""Decide si el precio actual de un producto es anomalo respecto de SU PROPIA
+historia. Nunca compara contra otros productos de la categoria.
+"""
 
-# Cuanta historia real necesitamos antes de confiar en la mediana propia.
+from datetime import datetime, timedelta, timezone
+
+# Cuanta historia real necesitamos antes de confiar en la referencia propia.
 # Antes bastaban 3 filas; corriendo cada hora eso eran 3 horas, asi que la
 # "mediana historica" era practicamente el precio actual y nunca disparaba.
 MIN_SPAN_HOURS = 48
 
-# Con el esquema comprimido, un producto que nunca cambio de precio tiene UN
-# solo tramo -- y es justamente la mejor referencia posible. Lo que exigimos es
-# cobertura temporal (MIN_SPAN_HOURS), no cantidad de tramos ni de muestras.
+# Ventana de referencia por defecto.
+DEFAULT_WINDOW_DAYS = 30
 
 # Piso de peso de un tramo, para que un cambio de precio recien detectado no
-# entre con peso ~0 a la mediana. Va atado al intervalo de escaneo mas corto
-# (15 min en la ventana diurna).
+# entre con peso ~0 a la mediana. Atado al intervalo de escaneo mas corto.
 MIN_SEGMENT_WEIGHT_SECONDS = 900
 
-# Niveles de severidad segun cuanto cae el precio vs. su referencia
-# (mediana historica propia, o precio normal reportado por la tienda).
-# Se evalua de mas estricto a menos estricto y gana el primero que matchea.
+# Etiquetas de severidad segun cuanto cae el precio vs. su referencia. Son
+# solo nombres: quien decide si se alerta es alert_max_ratio, configurable
+# por perfil.
 DROP_TIERS = (
     (0.50, "ULTRA descuento"),  # cae a <=50% de su referencia
     (0.65, "Gran descuento"),  # cae a <=65%
     (0.80, "Descuento leve"),  # cae a <=80%
 )
 
-# Sin historia propia la unica referencia es el "precio normal" que reporta la
-# misma tienda, y ese numero viene inflado por campanas comerciales. Solo
-# confiamos en el nivel mas severo.
-STORE_DISCOUNT_THRESHOLD = DROP_TIERS[0][0]
+# El "precio normal" que reporta la tienda viene inflado por campanas
+# comerciales, asi que como fuente es mas debil que la historia propia y
+# nunca lo dejamos mas permisivo que esto.
+STORE_DISCOUNT_MAX_RATIO = 0.50
 
 _TS_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f")
+
+
+def utcnow():
+    """SQLite guarda CURRENT_TIMESTAMP en UTC; comparamos contra eso."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _clp(n) -> str:
@@ -68,25 +75,32 @@ def weighted_median(pairs):
     return pairs[-1][0]
 
 
-def utcnow():
-    """SQLite guarda CURRENT_TIMESTAMP en UTC; comparamos contra eso."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+def has_mature_history(segments, now=None) -> bool:
+    """True si el producto ya acumulo historia suficiente para usar su mediana."""
+    if not segments:
+        return False
+    first = _parse_ts(segments[0]["first_seen"])
+    if first is None:
+        return False
+    return (now or utcnow()) - first >= timedelta(hours=MIN_SPAN_HOURS)
 
 
-def baseline_from_segments(segments, now=None):
-    """Mediana ponderada por TIEMPO y cobertura temporal de los tramos.
+def baseline_from_segments(segments, window_days=DEFAULT_WINDOW_DAYS, now=None):
+    """Mediana ponderada por TIEMPO sobre los ultimos `window_days`.
 
     Ponderar por tiempo (y no por cantidad de muestras) evita que una falla de
     precio que dura 2 horas arrastre su propia referencia, y hace que un precio
     que se sostuvo una semana pese lo que corresponde.
 
-    La duracion de cada tramo se deduce del inicio del tramo siguiente; el
-    ultimo tramo (el vigente) se extiende hasta ahora. Asi el peso es correcto
-    sin que el scanner tenga que ir escribiendo `last_seen` en cada corrida.
+    Cada tramo dura hasta que empieza el siguiente; el ultimo, hasta ahora. Eso
+    permite que el scanner no escriba nada cuando el precio no cambia (ver
+    db.flush_prices), a costa de tener que recortar aca contra la ventana: un
+    tramo que empezo hace 90 dias solo aporta los ultimos 30.
 
-    Devuelve (baseline, span_hours, minimo_historico).
+    Devuelve (baseline, span_hours, minimo_en_ventana).
     """
     now = now or utcnow()
+    window_start = now - timedelta(days=window_days)
 
     starts = []
     for seg in segments:
@@ -95,68 +109,91 @@ def baseline_from_segments(segments, now=None):
             starts.append((start, seg["price"]))
     if not starts:
         return None, 0.0, None
-
     starts.sort()
+
     pairs = []
+    prices = []
     for i, (start, price) in enumerate(starts):
         end = starts[i + 1][0] if i + 1 < len(starts) else now
-        weight = max((end - start).total_seconds(), MIN_SEGMENT_WEIGHT_SECONDS)
+        lo, hi = max(start, window_start), min(end, now)
+        if hi <= lo:
+            continue  # el tramo quedo fuera de la ventana
+        weight = max((hi - lo).total_seconds(), MIN_SEGMENT_WEIGHT_SECONDS)
         pairs.append((price, weight))
+        prices.append(price)
 
-    span_hours = max((now - starts[0][0]).total_seconds() / 3600, 0.0)
-    return weighted_median(pairs), span_hours, min(p for _, p in starts)
+    if not pairs:
+        return None, 0.0, None
+
+    span_hours = max((now - max(starts[0][0], window_start)).total_seconds() / 3600, 0.0)
+    return weighted_median(pairs), span_hours, min(prices)
 
 
-def check_anomaly(product: dict, segments: list, min_price: int = 0):
-    """Devuelve dict(reason, ratio, source) o None si no hay nada raro.
+def check_anomaly(
+    product: dict,
+    segments: list,
+    min_price: int = 0,
+    alert_max_ratio: float = 0.50,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    now=None,
+):
+    """Devuelve dict(reason, ratio, source, baseline) o None si no hay nada raro.
 
-    Compara el precio actual del producto contra SU PROPIA referencia
-    (mediana historica ponderada por tiempo, o el precio normal que reporta
-    la tienda), nunca contra otros productos de la categoria.
+    `alert_max_ratio` es el gatillo: el precio debe caer a esa fraccion o menos
+    de su referencia. El default 0.50 sale de medir la dispersion de precio
+    ENTRE TIENDAS del mismo producto (mediana 20%, p90 40%, maximo 45%, ningun
+    producto sobre 50% en ningun perfil). Como el precio que seguimos es el
+    minimo entre tiendas, cuando la tienda mas barata se queda sin stock el
+    precio "salta" dentro de ese rango; exigir >50% deja el ruido de quiebres
+    de stock por debajo del umbral.
     """
     price = product.get("price")
     if not price or price <= 0:
         return None
 
     # Piso absoluto: una caida del 60% en un producto de $3.000 es ruido, no
-    # una falla de precio que valga la pena mirar.
+    # una falla de precio aprovechable.
     if min_price and price < min_price:
         return None
 
-    baseline, span_hours, historic_min = baseline_from_segments(segments)
+    baseline, span_hours, historic_min = baseline_from_segments(
+        segments, window_days=window_days, now=now
+    )
 
     if baseline and span_hours >= MIN_SPAN_HOURS:
         ratio = price / baseline
-        tier = _drop_tier(ratio)
-        if tier:
+        if ratio <= alert_max_ratio:
             drop_pct = round((1 - ratio) * 100)
             extra = ""
             if historic_min is not None and price < historic_min:
                 extra = " - es su precio mas bajo registrado"
             return {
                 "reason": (
-                    f"{tier}: cayo {drop_pct}% vs su mediana de {span_hours / 24:.0f}d "
+                    f"{_drop_tier(ratio) or 'Descuento'}: cayo {drop_pct}% vs su "
+                    f"mediana de {span_hours / 24:.0f}d "
                     f"({_clp(baseline)} -> {_clp(price)}){extra}"
                 ),
                 "ratio": ratio,
                 "source": "history",
+                "baseline": baseline,
             }
-        # Con historia confiable, el descuento que reporta la tienda ya no
-        # aporta nada: la referencia propia manda.
+        # Con historia confiable, el descuento que reporta la tienda no aporta
+        # nada: la referencia propia manda.
         return None
 
     old_price = product.get("old_price")
     if old_price and old_price > price:
         ratio = price / old_price
-        if ratio <= STORE_DISCOUNT_THRESHOLD:
+        if ratio <= min(alert_max_ratio, STORE_DISCOUNT_MAX_RATIO):
             discount = product.get("discount") or round((1 - ratio) * 100)
             return {
                 "reason": (
-                    f"ULTRA descuento reportado por la tienda: {discount}% "
-                    f"({_clp(old_price)} -> {_clp(price)})"
+                    f"Descuento fuerte reportado por la tienda: {discount}% "
+                    f"({_clp(old_price)} -> {_clp(price)}) - sin historia propia todavia"
                 ),
                 "ratio": ratio,
                 "source": "store",
+                "baseline": old_price,
             }
 
     return None

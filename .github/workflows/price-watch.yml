@@ -49,6 +49,12 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # Bloqueante a proposito: si la logica de deteccion esta rota preferimos
+      # perder unos escaneos antes que mandar alertas basura o ensuciar el
+      # historial. Son ~1s y GitHub avisa por mail si falla.
+      - name: Tests
+        run: python -m unittest -v
+
       # continue-on-error para que la caida de un perfil no se lleve a los
       # otros ni impida guardar el historial de los que si corrieron.
       - name: Perfumes
