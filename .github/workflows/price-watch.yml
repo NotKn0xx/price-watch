@@ -1,0 +1,100 @@
+name: Price watch
+
+# Actions cobra cada job redondeado al minuto completo, asi que 3 workflows
+# separados costaban 3 minutos por ciclo aunque el escaneo real de los tres
+# perfiles toma ~18s. Consolidados: 1 minuto por ciclo.
+#
+# Las tiendas no mueven precios de madrugada, asi que no escaneamos entre las
+# 00:00 y las 08:00 CLT y gastamos todo el presupuesto en el horario util:
+# 15 horas seguidas cada 15 min = 60 jobs/dia (~1.800 min/mes), dentro del
+# plan Free con margen.
+#
+# Por que 15 min y no 10: GitHub atrasa los schedules entre 5 y 20 min bajo
+# carga. Con intervalo nominal de 10 min la deriva es mayor que el intervalo
+# y el espaciado real igual queda irregular, asi que la granularidad extra es
+# ficticia. Las horas de cobertura, en cambio, son reales -- al mismo costo
+# preferimos 15h cada 15 min antes que 10h cada 10 min.
+#
+# Los cron son UTC y Chile cambia de huso en septiembre (UTC-4 -> UTC-3).
+# La ventana 12:00-02:59 UTC cae en 08:00-22:59 CLT en invierno y en
+# 09:00-23:59 CLT en verano: cubre el dia comercial completo en ambos casos
+# sin tener que editar esto dos veces al ano.
+#
+# Los minutos van desfasados (2,17,32,47) a proposito: GitHub documenta que
+# la hora en punto es el peor momento para agendar.
+on:
+  schedule:
+    - cron: "2,17,32,47 12-23 * * *"
+    - cron: "2,17,32,47 0-2 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: price-watch-run
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # continue-on-error para que la caida de un perfil no se lleve a los
+      # otros ni impida guardar el historial de los que si corrieron.
+      - name: Perfumes
+        continue-on-error: true
+        run: python run.py
+        env:
+          PROFILE: perfumes
+          DB_PATH: price_watch_perfumes.db
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Hardware
+        continue-on-error: true
+        run: python run.py
+        env:
+          PROFILE: hardware
+          DB_PATH: price_watch_hardware.db
+          TELEGRAM_BOT_TOKEN: ${{ secrets.HARDWARE_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Celulares
+        continue-on-error: true
+        run: python run.py
+        env:
+          PROFILE: celulares
+          DB_PATH: price_watch_celulares.db
+          TELEGRAM_BOT_TOKEN: ${{ secrets.CELULARES_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Guardar historial de precios
+        if: always()
+        run: |
+          git config user.name "price-watch-bot"
+          git config user.email "actions@users.noreply.github.com"
+          # Si un perfil fallo antes de crear su .db, no queremos que el
+          # `git add` se lleve el paso completo y perdamos el resto.
+          for f in price_watch_perfumes.db price_watch_hardware.db price_watch_celulares.db; do
+            [ -f "$f" ] && git add "$f"
+          done
+          # Sin cambios de precio los .db quedan identicos byte a byte, asi
+          # que la mayoria de los ciclos no generan commit.
+          git diff --cached --quiet && echo "Sin cambios de precio" && exit 0
+          git commit -m "Actualiza historial de precios"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin main && git push && exit 0
+            sleep $((RANDOM % 15 + 5))
+          done
+          echo "No se pudo pushear el historial tras 5 intentos" >&2
+          exit 1

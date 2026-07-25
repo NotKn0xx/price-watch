@@ -7,52 +7,115 @@ en vez de scrapear cada tienda directamente.
 """
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 BASE_URL = "https://publicapi.solotodo.com"
 
+# La API tope page_size en 100 para /products/browse/; pedir mas no falla,
+# simplemente devuelve 100.
+MAX_PAGE_SIZE = 100
 
-def browse_category(category_id, store_ids, brand_id=None, page_size=100, max_pages=5, timeout=20):
+# Una sola sesion para todo el proceso: reusa la conexion TCP/TLS. Sin esto
+# cada request rehace el handshake (~0.4s vs ~0.15s medido contra la API).
+_session = None
+
+
+def get_session():
+    global _session
+    if _session is None:
+        s = requests.Session()
+        retry = Retry(
+            total=4,
+            backoff_factor=1.5,  # 0s, 1.5s, 3s, 6s
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("GET",),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=8)
+        s.mount("https://", adapter)
+        s.headers["User-Agent"] = "price-watch/1.0 (+github.com/NotKn0xx/price-watch)"
+        _session = s
+    return _session
+
+
+def browse_category(
+    category_id,
+    store_ids,
+    db_brand_id=None,
+    page_size=MAX_PAGE_SIZE,
+    max_pages=50,
+    timeout=30,
+    page_delay=0.0,
+):
     """Itera productos de una categoria, restringidos a store_ids.
 
     El precio devuelto es el mas bajo en CLP entre las tiendas filtradas.
-    Si se pasa brand_id, restringe ademas a esa marca (ej. Apple, Samsung).
+    Si se pasa db_brand_id, restringe ademas a esa marca (ej. Apple, Samsung).
+
+    Pagina hasta agotar la categoria (`count`), con max_pages solo como tope
+    de seguridad. Antes el tope real eran 3 paginas, lo que en perfumes
+    significaba mirar 300 de 2550 productos.
     """
+    page_size = min(page_size, MAX_PAGE_SIZE)
+    session = get_session()
     page = 1
     seen = 0
+    total = None
+    emitted = set()
+
     while page <= max_pages:
         params = [("categories", category_id)]
         params += [("stores", s) for s in store_ids]
-        if brand_id:
-            params.append(("brands", brand_id))
+        if db_brand_id:
+            # OJO: el parametro es `db_brands`, no `brands`. La API ignora
+            # silenciosamente `brands` y devuelve la categoria completa, que
+            # es como el perfil de celulares terminaba escaneando los mismos
+            # 160 equipos una vez por "marca".
+            params.append(("db_brands", db_brand_id))
         params += [("page", page), ("page_size", page_size)]
-        resp = requests.get(f"{BASE_URL}/products/browse/", params=params, timeout=timeout)
+
+        resp = session.get(f"{BASE_URL}/products/browse/", params=params, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
+
         results = data.get("results", [])
         if not results:
             break
+        if total is None:
+            total = data.get("count", 0)
+
         for entry in results:
             for pe in entry.get("product_entries", []):
                 product = pe["product"]
+                product_id = product["id"]
+                if product_id in emitted:
+                    continue
                 prices = _extract_clp_prices(pe.get("metadata", {}))
                 if prices is None:
                     continue
                 offer_price, normal_price = prices
+                emitted.add(product_id)
                 discount = None
-                if normal_price and normal_price > 0:
+                if normal_price and normal_price > offer_price:
                     discount = round((1 - offer_price / normal_price) * 100)
                 yield {
-                    "product_id": product["id"],
+                    "product_id": product_id,
                     "name": product["name"],
                     "category_id": category_id,
                     "price": offer_price,
                     "old_price": normal_price,
                     "discount": discount,
                 }
+
         seen += len(results)
-        if seen >= data.get("count", 0):
+        if total and seen >= total:
             break
         page += 1
+        if page_delay:
+            import time
+
+            time.sleep(page_delay)
 
 
 def _extract_clp_prices(metadata):
@@ -63,27 +126,48 @@ def _extract_clp_prices(metadata):
             normal = entry.get("normal_price")
             if offer is None:
                 return None
-            return (
-                int(float(offer)),
-                int(float(normal)) if normal is not None else None,
-            )
+            offer = int(float(offer))
+            if offer <= 0:
+                return None
+            normal = int(float(normal)) if normal is not None else None
+            # Algunas tiendas reportan normal_price < offer_price; en ese caso
+            # no sirve como referencia de descuento.
+            if normal is not None and normal < offer:
+                normal = None
+            return offer, normal
     return None
 
 
-def get_entities(product_id, timeout=20):
+def get_entities(product_id, timeout=30):
     """Detalle por tienda (precio, disponibilidad, URL) para un producto."""
-    resp = requests.get(f"{BASE_URL}/products/{product_id}/entities/", timeout=timeout)
+    resp = get_session().get(f"{BASE_URL}/products/{product_id}/entities/", timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
 
-def best_entity_for_alert(product_id, store_ids, timeout=20):
-    """Encuentra la entidad (tienda) mas barata entre store_ids para un producto."""
-    entities = get_entities(product_id, timeout=timeout)
-    candidates = [
-        e for e in entities
-        if e.get("store_id") in store_ids and e.get("active_registry")
-    ]
+def best_entity_for_alert(product_id, store_ids, timeout=30):
+    """Encuentra la entidad (tienda) mas barata y disponible entre store_ids."""
+    store_ids = set(store_ids)
+    try:
+        entities = get_entities(product_id, timeout=timeout)
+    except requests.RequestException:
+        return None
+
+    candidates = []
+    for e in entities:
+        if e.get("store_id") not in store_ids:
+            continue
+        reg = e.get("active_registry")
+        if not reg or not reg.get("is_available"):
+            continue
+        try:
+            price = int(float(reg["offer_price"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        candidates.append((price, e))
+
     if not candidates:
         return None
-    return min(candidates, key=lambda e: float(e["active_registry"]["offer_price"]))
+    return min(candidates, key=lambda c: c[0])[1]
