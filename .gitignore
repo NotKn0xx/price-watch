@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .env
+
+# Worker disparador
+node_modules/
+.wrangler/

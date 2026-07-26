@@ -1,0 +1,20 @@
+name = "price-watch-cron"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Cada 10 min en la misma ventana que usaba el workflow: 12:00-02:59 UTC, que
+# es 08:00-22:59 CLT en invierno y 09:00-23:59 en verano. Cubre el dia
+# comercial completo sin editar esto cuando Chile cambia de huso.
+#
+# Son 2 de los 5 Cron Triggers que permite el plan gratuito.
+[triggers]
+crons = ["*/10 12-23 * * *", "*/10 0-2 * * *"]
+
+[observability]
+enabled = true
+
+# Secreto (no va aqui):
+#   npx wrangler secret put GITHUB_TOKEN
+# Token de acceso personal de grano fino, limitado SOLO al repo price-watch,
+# con permiso Contents: Read and write. No uses un token clasico con scope
+# `repo`: da acceso a todos tus repositorios y este solo necesita uno.

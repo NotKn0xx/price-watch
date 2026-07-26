@@ -22,7 +22,14 @@ name: Price watch
 #
 # Los minutos van desfasados (2,17,32,47) a proposito: GitHub documenta que
 # la hora en punto es el peor momento para agendar.
+# Disparador principal: un Worker de Cloudflare (cloudflare-cron/) llama a
+# repository_dispatch cada 10 min. El cron de GitHub de abajo se mantiene como
+# red de seguridad: si el Worker deja de disparar, el bot sigue corriendo -- mal
+# espaciado, pero corriendo. Medido antes de esto, el schedule de GitHub solo
+# cumplia el 23% de las corridas previstas (14/dia de 60).
 on:
+  repository_dispatch:
+    types: [escanear]
   schedule:
     - cron: "2,17,32,47 12-23 * * *"
     - cron: "2,17,32,47 0-2 * * *"
@@ -40,6 +47,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # Mide la puntualidad del disparador: el Worker manda la hora que el cron
+      # pretendia y la que se ejecuto de verdad. Sin esto no hay forma de saber
+      # si cambiar de disparador sirvio de algo.
+      - name: Puntualidad del disparo
+        if: github.event_name == 'repository_dispatch'
+        run: |
+          desfase="${{ github.event.client_payload.desfase_s }}"
+          echo "| disparo | valor |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| programado | ${{ github.event.client_payload.programado_iso }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| real | ${{ github.event.client_payload.real_iso }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| desfase | ${desfase}s |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Desfase del disparador: ${desfase}s"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
