@@ -1,0 +1,87 @@
+name: Probar Telegram
+
+# Comprueba que las alertas llegan al telefono, sin esperar a que ocurra una
+# falla de precio real.
+#
+# Existe porque la ruta de notificacion es la unica parte del sistema que solo
+# se ejercita cuando ya es tarde: si el bot esta bloqueado, el chat_id cambio o
+# el token caduco, no hay forma de enterarse hasta que se pierde la primera
+# oferta buena. Cada perfil usa su propio bot, asi que se prueban los tres.
+#
+# Lanzar desde la pestana Actions -> Probar Telegram -> Run workflow.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Enviar mensaje de prueba con cada bot
+        env:
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TOKEN_PERFUMES: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TOKEN_HARDWARE: ${{ secrets.HARDWARE_TELEGRAM_BOT_TOKEN }}
+          TOKEN_CELULARES: ${{ secrets.CELULARES_TELEGRAM_BOT_TOKEN }}
+        run: |
+          echo "| bot | resultado |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          fallos=0
+          for perfil in perfumes hardware celulares; do
+            case "$perfil" in
+              perfumes)  token="$TOKEN_PERFUMES" ;;
+              hardware)  token="$TOKEN_HARDWARE" ;;
+              celulares) token="$TOKEN_CELULARES" ;;
+            esac
+
+            if [ -z "$token" ]; then
+              echo "| $perfil | sin token configurado |" >> "$GITHUB_STEP_SUMMARY"
+              echo "$perfil: sin token"
+              fallos=$((fallos + 1))
+              continue
+            fi
+
+            # Proceso aparte por bot: notifier lee las credenciales al
+            # importarse, asi que cada uno necesita su propio interprete.
+            if TELEGRAM_BOT_TOKEN="$token" TELEGRAM_CHAT_ID="$CHAT" \
+               python -c "
+          import sys
+          from notifier import send_alert
+          texto = (
+              'Prueba de price-watch [$perfil]\n\n'
+              'Si lees esto, las alertas de este bot funcionan.\n'
+              'No es una oferta: es una comprobacion manual.'
+          )
+          sys.exit(0 if send_alert(texto) else 1)
+          "; then
+              echo "| $perfil | enviado |" >> "$GITHUB_STEP_SUMMARY"
+              echo "$perfil: ok"
+            else
+              echo "| $perfil | FALLO |" >> "$GITHUB_STEP_SUMMARY"
+              echo "$perfil: FALLO"
+              fallos=$((fallos + 1))
+            fi
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$fallos" -gt 0 ]; then
+            echo "**$fallos de 3 bots no pudieron enviar.**" >> "$GITHUB_STEP_SUMMARY"
+            echo "El motivo exacto sale en el log del paso (notifier imprime el HTTP y el cuerpo)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Los 3 bots enviaron correctamente.** Revisa el telefono." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$fallos"
