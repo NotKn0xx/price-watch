@@ -15,6 +15,7 @@ from db import (
     load_recent_alerts,
     load_segments,
     prune_history,
+    purge_foreign_categories,
     record_alert,
     upsert_products,
 )
@@ -112,6 +113,12 @@ def run_once():
     # ANTES de tocar Telegram: una caida de Telegram ya no puede hacernos
     # perder el historial recolectado en esta corrida.
     with get_conn() as conn:
+        # El perfil manda: si el .db trae categorias que ya no se vigilan
+        # (tipico al reutilizar un archivo tras redefinir perfiles), se van.
+        sobrantes = purge_foreign_categories(conn, [c["id"] for c in profile.CATEGORIES])
+        if sobrantes:
+            print(f"Descartados {sobrantes} productos de categorias ajenas al perfil '{PROFILE}'")
+
         for target in profile.CATEGORIES:
             print(f"Escaneando '{target['name']}'...")
             try:

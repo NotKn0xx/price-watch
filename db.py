@@ -209,6 +209,42 @@ def prune_history(conn, keep_days=90):
     conn.execute("DELETE FROM alerts WHERE sent_at < datetime('now', ?)", (f"-{keep_days} days",))
 
 
+def purge_foreign_categories(conn, category_ids):
+    """Borra lo que quedo de categorias que el perfil ya no vigila.
+
+    El perfil es la fuente de verdad sobre que se sigue. Si un .db se reutiliza
+    tras redefinir los perfiles, arrastra productos de categorias ajenas que
+    nunca vuelven a recibir precios: no generan alertas, pero engordan el
+    archivo (que se commitea en cada cambio) y ensucian cualquier analisis.
+
+    `prune_history` no los alcanza: protege siempre el tramo vigente de cada
+    producto, y estos tienen exactamente uno.
+
+    Devuelve cuantos productos se descartaron.
+    """
+    ids = sorted(set(category_ids))
+    if not ids:
+        return 0
+
+    placeholders = ",".join("?" * len(ids))
+    sobrantes = [
+        r["product_id"]
+        for r in conn.execute(
+            f"SELECT product_id FROM products WHERE category_id NOT IN ({placeholders})",
+            tuple(ids),
+        )
+    ]
+    if not sobrantes:
+        return 0
+
+    for chunk in _chunks(sobrantes, _CHUNK):
+        marcas = ",".join("?" * len(chunk))
+        conn.execute(f"DELETE FROM price_history WHERE product_id IN ({marcas})", tuple(chunk))
+        conn.execute(f"DELETE FROM alerts WHERE product_id IN ({marcas})", tuple(chunk))
+        conn.execute(f"DELETE FROM products WHERE product_id IN ({marcas})", tuple(chunk))
+    return len(sobrantes)
+
+
 def load_recent_alerts(conn, product_ids, within_hours=24):
     """{product_id: menor precio ya alertado en la ventana}."""
     out = {}

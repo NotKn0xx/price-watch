@@ -120,6 +120,26 @@ Variables de entorno:
 | `DRY_RUN` | `1` imprime las alertas en vez de enviarlas |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Credenciales del bot |
 
+## El perfil manda sobre el contenido de su base
+
+Al inicio de cada corrida se descarta todo producto cuya categoria no este en
+las `CATEGORIES` del perfil, junto con su historial y sus alertas.
+
+Existe porque paso: al dividir el bot de un perfil unico en tres, el `.db`
+original se reutilizo como el de perfumes y arrastro 1.334 productos de
+celulares, TV, notebooks y linea blanca. Nunca volvieron a recibir precios
+—asi que no generaban alertas— pero eran el 34% de las filas de un archivo que
+se commitea en cada cambio.
+
+`prune_history` no los alcanzaba: protege siempre el tramo vigente de cada
+producto, y estos tenian exactamente uno. Eran permanentes.
+
+> **Consecuencia:** sacar una categoria de un perfil **borra su historial** en
+> la siguiente corrida. Es deliberado —el perfil es la fuente de verdad— pero
+> si solo quieres pausarla, comentala en el workflow, no en `CATEGORIES`.
+> El `.db` esta versionado, asi que un borrado por error se recupera del
+> historial de git.
+
 ## Agregar un perfil
 
 Crear `profiles/<nombre>.py` con `CATEGORIES`, `STORE_IDS` y los umbrales, y

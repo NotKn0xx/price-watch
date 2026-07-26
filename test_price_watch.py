@@ -216,6 +216,78 @@ class TestDB(unittest.TestCase):
         self.assertEqual(recientes, {1: 5000, 2: 7000})
 
 
+class TestPurgaDeCategorias(unittest.TestCase):
+    """El perfil manda: lo que no vigila, no se guarda.
+
+    Reproduce el arrastre real que dejo 1.334 productos de celulares, TV y
+    linea blanca dentro de la base de perfumes al dividir el bot en perfiles.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.path = Path(self.tmp.name)
+        self._orig = db.DB_PATH
+        db.DB_PATH = self.path
+        db.init_db()
+        with db.get_conn() as conn:
+            db.upsert_products(conn, [
+                {"product_id": 1, "name": "Perfume A", "category_id": 780},
+                {"product_id": 2, "name": "Perfume B", "category_id": 780},
+                {"product_id": 3, "name": "Lavadora",  "category_id": 19},
+                {"product_id": 4, "name": "iPhone",    "category_id": 6},
+            ])
+            db.flush_prices(conn, {}, [(1, 50000), (2, 60000), (3, 300000), (4, 900000)])
+            db.record_alert(conn, 3, 150000, "prueba", 9, "http://x")
+
+    def tearDown(self):
+        db.DB_PATH = self._orig
+        self.path.unlink(missing_ok=True)
+
+    def _ids(self, tabla, col="product_id"):
+        with db.get_conn() as conn:
+            return sorted(r[0] for r in conn.execute(f"SELECT {col} FROM {tabla}"))
+
+    def test_borra_productos_de_categorias_ajenas(self):
+        with db.get_conn() as conn:
+            n = db.purge_foreign_categories(conn, [780])
+        self.assertEqual(n, 2)
+        self.assertEqual(self._ids("products"), [1, 2])
+
+    def test_arrastra_su_historial_y_sus_alertas(self):
+        with db.get_conn() as conn:
+            db.purge_foreign_categories(conn, [780])
+        self.assertEqual(self._ids("price_history"), [1, 2])
+        self.assertEqual(self._ids("alerts"), [])
+
+    def test_no_toca_las_categorias_vigiladas(self):
+        with db.get_conn() as conn:
+            db.purge_foreign_categories(conn, [780])
+            segs = db.load_segments(conn, [1, 2])
+        self.assertEqual([s["price"] for s in segs[1]], [50000])
+        self.assertEqual([s["price"] for s in segs[2]], [60000])
+
+    def test_es_idempotente_y_no_reescribe_el_archivo(self):
+        """Sin sobrantes no debe tocar el .db: si no, cada corrida commitearia."""
+        with db.get_conn() as conn:
+            db.purge_foreign_categories(conn, [780])
+        antes = hashlib.md5(self.path.read_bytes()).hexdigest()
+        with db.get_conn() as conn:
+            self.assertEqual(db.purge_foreign_categories(conn, [780]), 0)
+        self.assertEqual(antes, hashlib.md5(self.path.read_bytes()).hexdigest())
+
+    def test_perfil_con_varias_categorias_las_respeta_todas(self):
+        with db.get_conn() as conn:
+            self.assertEqual(db.purge_foreign_categories(conn, [780, 19, 6]), 0)
+        self.assertEqual(self._ids("products"), [1, 2, 3, 4])
+
+    def test_lista_vacia_no_borra_nada(self):
+        """Un perfil sin CATEGORIES no debe vaciar la base entera."""
+        with db.get_conn() as conn:
+            self.assertEqual(db.purge_foreign_categories(conn, []), 0)
+        self.assertEqual(self._ids("products"), [1, 2, 3, 4])
+
+
 class TestMigracion(unittest.TestCase):
     def test_migra_esquema_viejo_colapsando_corridas(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
