@@ -1,0 +1,87 @@
+# Capa francotirador: historial POR TIENDA de una watchlist acotada.
+#
+# Separado de price-watch.yml a proposito, y con otra cadencia.
+#
+# price-watch.yml corre cada 10 min porque caza errores de precio, que duran
+# minutos. Esto no: sirve para responder "subio en una tienda o en todas?" con
+# semanas de perspectiva, y para eso la granularidad diaria sobra. Detectar que
+# algo subio tres semanas antes de un evento no necesita resolucion de minutos.
+#
+# El presupuesto lo decide: cada producto de la watchlist es UNA peticion
+# (/products/{id}/entities/), porque /products/browse/ no devuelve tiendas.
+# A 120 productos por perfil, dos corridas diarias son ~720 peticiones al dia.
+# A cada 10 min serian ~52.000, que es pedir que nos bloqueen.
+
+name: vigilar por tienda
+
+on:
+  schedule:
+    - cron: "25 13 * * *"   # ~09:25 CLT
+    - cron: "25 01 * * *"   # ~21:25 CLT
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+# Mismo grupo que price-watch.yml: ambos escriben y commitean los mismos .db.
+# Sin esto, dos corridas simultaneas chocan al hacer push.
+concurrency:
+  group: price-watch-run
+  cancel-in-progress: false
+
+jobs:
+  vigilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Bloqueante: si la logica esta rota preferimos perder una corrida antes
+      # que ensuciar el historial por tienda, que es el que sostiene lo que
+      # despues se afirma en publico.
+      - name: Tests
+        run: python -m unittest
+
+      - name: Perfumes
+        continue-on-error: true
+        run: python vigilar.py
+        env:
+          PROFILE: perfumes
+          DB_PATH: price_watch_perfumes.db
+
+      - name: Hardware
+        continue-on-error: true
+        run: python vigilar.py
+        env:
+          PROFILE: hardware
+          DB_PATH: price_watch_hardware.db
+
+      - name: Celulares
+        continue-on-error: true
+        run: python vigilar.py
+        env:
+          PROFILE: celulares
+          DB_PATH: price_watch_celulares.db
+
+      - name: Guardar historial por tienda
+        if: always()
+        run: |
+          git config user.name "price-watch-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -- *.db
+          # Sin cambios de precio no hay nada que commitear, y es lo normal:
+          # los tramos solo se escriben cuando el precio de una tienda cambia.
+          if git diff --cached --quiet; then
+            echo "sin cambios de precio por tienda" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git commit -m "Historial por tienda $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull --rebase --autostash origin main
+          git push origin main

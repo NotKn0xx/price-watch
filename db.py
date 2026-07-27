@@ -44,9 +44,38 @@ CREATE TABLE IF NOT EXISTS alerts (
     sent_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Historial POR TIENDA, solo para la watchlist (capa francotirador).
+--
+-- `price_history` guarda un unico precio por producto: el mas barato entre las
+-- tiendas del perfil. Sirve para alertar, pero no permite responder "subio en
+-- una tienda o en todas?", que es la pregunta que separa una decision de esa
+-- tienda de un alza de mercado (proveedor, dolar). Sin esa distincion no se
+-- puede afirmar nada sobre alzas previas sin arriesgar acusar en falso.
+--
+-- No se puede tener para todo el catalogo: /products/browse/ NO devuelve
+-- tiendas (verificado), asi que el detalle exige /products/{id}/entities/, una
+-- peticion por producto. Aplicarlo a los 4.281 productos serian ~11.000
+-- peticiones diarias extra contra la API gratuita de Solotodo. Por eso solo la
+-- watchlist: 100-300 productos elegidos, que es de sobra para 3-4 videos por
+-- semana.
+--
+-- Mismo formato de tramos comprimidos que price_history: se escribe solo
+-- cuando el precio cambia, o el .db (que va en git) creceria sin control.
+CREATE TABLE IF NOT EXISTS store_prices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    store_id INTEGER NOT NULL,
+    price INTEGER NOT NULL,
+    normal_price INTEGER,
+    url TEXT,
+    first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_price_history_product ON price_history(product_id, first_seen);
 CREATE INDEX IF NOT EXISTS idx_alerts_product ON alerts(product_id, sent_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_sent ON alerts(sent_at);
+CREATE INDEX IF NOT EXISTS idx_store_prices ON store_prices(product_id, store_id, first_seen);
 """
 
 
@@ -189,6 +218,93 @@ def flush_prices(conn, segments_by_product, observations):
             [(c[0], c[1]) for c in changed],
         )
     return unchanged, len(changed)
+
+
+def load_store_segments(conn, product_ids):
+    """Tramos por (producto, tienda). {(product_id, store_id): [tramos...]}.
+
+    Mismo criterio que load_segments: no filtra por fecha, porque el tramo
+    vigente no reescribe `last_seen` y un filtro temporal descartaria justo las
+    referencias mas estables. El recorte lo hace quien interpreta la serie.
+    """
+    out = {}
+    ids = list(product_ids)
+    if not ids:
+        return out
+    for chunk in _chunks(ids, _CHUNK):
+        marcas = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"""
+            SELECT id, product_id, store_id, price, normal_price, url,
+                   first_seen, last_seen
+            FROM store_prices
+            WHERE product_id IN ({marcas})
+            ORDER BY product_id, store_id, first_seen
+            """,
+            tuple(chunk),
+        ).fetchall()
+        for r in rows:
+            out.setdefault((r["product_id"], r["store_id"]), []).append(dict(r))
+    return out
+
+
+def flush_store_prices(conn, segments_by_key, observations):
+    """Aplica observaciones por tienda. Cada una: (product_id, store_id, price,
+    normal_price, url).
+
+    Solo escribe cuando el precio de ESA tienda cambia. Una corrida sin cambios
+    deja el archivo intacto byte a byte y no genera commit.
+
+    La url se refresca al abrir tramo: las tiendas rotan sus URLs de producto y
+    una url vieja es un link roto -- que en un video publicado es peor que no
+    tener link.
+    """
+    sin_cambio, cambiados = 0, []
+    for product_id, store_id, price, normal_price, url in observations:
+        tramos = segments_by_key.get((product_id, store_id))
+        vigente = tramos[-1] if tramos else None
+        if vigente and vigente["price"] == price:
+            sin_cambio += 1
+        else:
+            cambiados.append(
+                (product_id, store_id, price, normal_price, url,
+                 vigente["id"] if vigente else None)
+            )
+
+    cerrar = [(c[5],) for c in cambiados if c[5] is not None]
+    if cerrar:
+        conn.executemany(
+            "UPDATE store_prices SET last_seen = CURRENT_TIMESTAMP WHERE id = ?",
+            cerrar,
+        )
+    if cambiados:
+        conn.executemany(
+            """INSERT INTO store_prices (product_id, store_id, price, normal_price, url)
+               VALUES (?, ?, ?, ?, ?)""",
+            [c[:5] for c in cambiados],
+        )
+    return sin_cambio, len(cambiados)
+
+
+def prune_store_prices(conn, keep_days=200):
+    """Retencion mas larga que price_history, a proposito.
+
+    El detector de alzas previas necesita mirar 60-90 dias atras; con los 90 de
+    price_history el margen seria cero y se estaria leyendo justo el borde de lo
+    que ya se borro. Como la watchlist son cientos de productos y no miles, la
+    retencion larga no infla el repo.
+
+    Protege el tramo vigente de cada (producto, tienda) por la misma razon que
+    prune_history: su last_seen es antiguo por diseno.
+    """
+    conn.execute(
+        """
+        DELETE FROM store_prices
+        WHERE last_seen < datetime('now', ?)
+          AND id NOT IN (SELECT MAX(id) FROM store_prices GROUP BY product_id, store_id)
+        """,
+        (f"-{keep_days} days",),
+    )
 
 
 def prune_history(conn, keep_days=90):

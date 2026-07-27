@@ -332,3 +332,232 @@ class TestMigracion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# --- Capa francotirador: historial por tienda ------------------------------
+#
+# Estos tests cubren lo que despues se afirma en publico. Un falso positivo
+# aqui no es un bug: es acusar a una tienda de algo que no hizo.
+
+import francotirador
+from francotirador import observaciones_de
+
+
+def _entidad(store_id, oferta, normal=None, disponible=True, url="http://x"):
+    return {
+        "store_id": store_id,
+        "external_url": url,
+        "active_registry": {
+            "is_available": disponible,
+            "offer_price": oferta,
+            "normal_price": normal if normal is not None else oferta,
+        },
+    }
+
+
+class TestObservacionesDe(unittest.TestCase):
+    def test_convierte_precios_de_texto_a_entero(self):
+        """La API devuelve '81990.00', no 81990."""
+        filas = observaciones_de([_entidad(9, "81990.00", "99990.00")])
+        self.assertEqual(filas[0][1:4], (9, 81990, 99990))
+
+    def test_descarta_no_disponible(self):
+        """Un precio de algo agotado no es un precio: mandaria gente a una
+        pagina sin stock."""
+        self.assertEqual(observaciones_de([_entidad(9, "1000", disponible=False)]), [])
+
+    def test_descarta_sin_registro_activo(self):
+        self.assertEqual(observaciones_de([{"store_id": 9, "active_registry": None}]), [])
+
+    def test_descarta_precio_ilegible_o_no_positivo(self):
+        for malo in (None, "", "gratis", "0", "-500"):
+            with self.subTest(precio=malo):
+                self.assertEqual(observaciones_de([_entidad(9, malo)]), [])
+
+    def test_descarta_entidad_sin_tienda(self):
+        self.assertEqual(observaciones_de([_entidad(None, "1000")]), [])
+
+    def test_filtra_por_store_ids(self):
+        ents = [_entidad(9, "1000"), _entidad(11, "2000"), _entidad(999, "3000")]
+        filas = observaciones_de(ents, store_ids={9, 11})
+        self.assertEqual(sorted(f[1] for f in filas), [9, 11])
+
+    def test_sin_store_ids_no_filtra(self):
+        ents = [_entidad(9, "1000"), _entidad(999, "3000")]
+        self.assertEqual(len(observaciones_de(ents)), 2)
+
+    def test_entrada_vacia_o_nula(self):
+        self.assertEqual(observaciones_de([]), [])
+        self.assertEqual(observaciones_de(None), [])
+
+    def test_normal_price_ausente_no_rompe(self):
+        e = _entidad(9, "1000")
+        e["active_registry"]["normal_price"] = None
+        self.assertEqual(observaciones_de([e])[0][3], None)
+
+
+class TestStorePrices(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.path = Path(self.tmp.name)
+        self._orig = db.DB_PATH
+        db.DB_PATH = self.path
+        db.init_db()
+
+    def tearDown(self):
+        db.DB_PATH = self._orig
+        self.path.unlink(missing_ok=True)
+
+    def _hash(self):
+        return hashlib.md5(self.path.read_bytes()).hexdigest()
+
+    def _observar(self, obs):
+        with db.get_conn() as conn:
+            segs = db.load_store_segments(conn, [o[0] for o in obs])
+            return db.flush_store_prices(conn, segs, obs)
+
+    def test_abre_un_tramo_por_tienda(self):
+        """Mismo producto en dos tiendas son dos series independientes."""
+        sc, ca = self._observar([(1, 9, 1000, 1200, "u"), (1, 11, 1100, 1100, "v")])
+        self.assertEqual((sc, ca), (0, 2))
+
+    def test_precio_igual_deja_el_archivo_intacto(self):
+        """La propiedad que hace viable commitear el .db a git."""
+        self._observar([(1, 9, 1000, 1200, "u")])
+        antes = self._hash()
+        sc, ca = self._observar([(1, 9, 1000, 1200, "u")])
+        self.assertEqual((sc, ca), (1, 0))
+        self.assertEqual(self._hash(), antes)
+
+    def test_cambio_en_una_tienda_no_toca_la_otra(self):
+        """El nucleo de la corroboracion entre tiendas: si solo una se movio,
+        la serie de la otra debe quedar igual."""
+        self._observar([(1, 9, 1000, 1200, "u"), (1, 11, 1100, 1100, "v")])
+        self._observar([(1, 9, 800, 1200, "u"), (1, 11, 1100, 1100, "v")])
+        with db.get_conn() as conn:
+            segs = db.load_store_segments(conn, [1])
+        self.assertEqual([s["price"] for s in segs[(1, 9)]], [1000, 800])
+        self.assertEqual([s["price"] for s in segs[(1, 11)]], [1100])
+
+    def test_la_url_se_refresca_al_cambiar_precio(self):
+        """Las tiendas rotan URLs; una url vieja es un link roto en un video
+        ya publicado."""
+        self._observar([(1, 9, 1000, None, "vieja")])
+        self._observar([(1, 9, 900, None, "nueva")])
+        with db.get_conn() as conn:
+            segs = db.load_store_segments(conn, [1])
+        self.assertEqual(segs[(1, 9)][-1]["url"], "nueva")
+
+    def test_prune_conserva_el_tramo_vigente(self):
+        """Su last_seen es antiguo por diseno: borrarlo perderia la referencia."""
+        self._observar([(1, 9, 1000, None, "u")])
+        with db.get_conn() as conn:
+            db.prune_store_prices(conn, keep_days=0)
+            quedan = conn.execute("SELECT COUNT(*) FROM store_prices").fetchone()[0]
+        self.assertEqual(quedan, 1)
+
+    def test_retencion_mas_larga_que_price_history(self):
+        """El detector de alzas previas mira 60-90 dias: con los 90 de
+        price_history el margen seria cero."""
+        import inspect
+        d = inspect.signature(db.prune_store_prices).parameters["keep_days"].default
+        h = inspect.signature(db.prune_history).parameters["keep_days"].default
+        self.assertGreater(d, h)
+
+
+class TestVigilar(unittest.TestCase):
+    """vigilar() con la red simulada: un producto que falla no debe llevarse
+    la corrida ni dejar huecos en el resto de la watchlist."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.path = Path(self.tmp.name)
+        self._orig_db = db.DB_PATH
+        db.DB_PATH = self.path
+        db.init_db()
+        self._orig_get = francotirador.get_entities
+
+    def tearDown(self):
+        francotirador.get_entities = self._orig_get
+        db.DB_PATH = self._orig_db
+        self.path.unlink(missing_ok=True)
+
+    def test_un_producto_que_falla_no_detiene_al_resto(self):
+        def falso(product_id, **kw):
+            if product_id == 2:
+                raise RuntimeError("500 de Solotodo")
+            return [_entidad(9, "1000")]
+
+        francotirador.get_entities = falso
+        vistos = []
+        with db.get_conn() as conn:
+            sc, ca, fallidos = francotirador.vigilar(
+                conn, [1, 2, 3], demora=0, al_fallar=lambda p, e: vistos.append(p)
+            )
+        self.assertEqual((ca, fallidos), (2, 1))
+        self.assertEqual(vistos, [2])
+
+    def test_watchlist_vacia_no_toca_la_red(self):
+        def explota(*a, **k):
+            raise AssertionError("no deberia consultarse la API")
+
+        francotirador.get_entities = explota
+        with db.get_conn() as conn:
+            self.assertEqual(francotirador.vigilar(conn, [], demora=0), (0, 0, 0))
+
+
+class TestElegirWatchlist(unittest.TestCase):
+    """La seleccion no debe premiar el ruido por stock.
+
+    price_history guarda el precio mas barato ENTRE tiendas: si la tienda barata
+    se agota, el precio "sube" sin que nadie lo haya cambiado. Contar tramos
+    elegiria justo esos productos.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.path = Path(self.tmp.name)
+        self._orig = db.DB_PATH
+        db.DB_PATH = self.path
+        db.init_db()
+
+    def tearDown(self):
+        db.DB_PATH = self._orig
+        self.path.unlink(missing_ok=True)
+
+    def _sembrar(self, product_id, precios):
+        with db.get_conn() as conn:
+            for p in precios:
+                conn.execute(
+                    "INSERT INTO price_history (product_id, price) VALUES (?, ?)",
+                    (product_id, p),
+                )
+
+    def _elegir(self, limite=10):
+        import vigilar
+        with db.get_conn() as conn:
+            return vigilar.elegir_watchlist(conn, limite)
+
+    def test_el_que_oscila_entre_dos_precios_pierde(self):
+        """Caso real de la base: $102.990 <-> $111.990 cuatro veces. Muchos
+        tramos, solo dos niveles: es quiebre de stock, no movimiento."""
+        self._sembrar(1, [102990, 111990] * 5)          # 10 tramos, 2 niveles
+        self._sembrar(2, [100000, 92000, 85000, 78000])  # 4 tramos, 4 niveles
+        self.assertEqual(self._elegir()[0], 2)
+
+    def test_descarta_amplitud_insignificante(self):
+        """Bajo 8% entre maximo y minimo no hay nada publicable."""
+        self._sembrar(1, [69890, 69900, 69930])
+        self.assertNotIn(1, self._elegir())
+
+    def test_descarta_producto_sin_movimiento(self):
+        self._sembrar(1, [50000])
+        self.assertEqual(self._elegir(), [])
+
+    def test_respeta_el_limite(self):
+        for pid in range(1, 8):
+            self._sembrar(pid, [100000, 80000, 60000])
+        self.assertEqual(len(self._elegir(limite=3)), 3)
