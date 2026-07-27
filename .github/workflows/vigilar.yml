@@ -83,5 +83,26 @@ jobs:
             exit 0
           fi
           git commit -m "Historial por tienda $(date -u +%Y-%m-%dT%H:%MZ)"
-          git pull --rebase --autostash origin main
-          git push origin main
+
+          # Mismo criterio que price-watch.yml: nada de `pull --rebase` sobre
+          # los .db, que son binarios y no se pueden fusionar. Ante un rechazo
+          # se toma el .db del remoto y se reaplica el sidecar encima.
+          for i in 1 2 3; do
+            git push origin main && exit 0
+            echo "push rechazado (intento $i): el remoto avanzo, reaplicando"
+            git fetch origin main || exit 1
+            git reset --hard FETCH_HEAD
+            for p in perfumes hardware celulares; do
+              [ -f ".observaciones-$p.json" ] || continue
+              DB_PATH="price_watch_$p.db" python reaplicar.py ".observaciones-$p.json"
+            done
+            git add -- *.db
+            if git diff --cached --quiet; then
+              echo "Tras reaplicar no queda nada nuevo" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            git commit -m "Historial por tienda $(date -u +%Y-%m-%dT%H:%MZ)"
+            sleep $((RANDOM % 10 + 3))
+          done
+          echo "No se pudo pushear tras 3 intentos" >&2
+          exit 1

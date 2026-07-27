@@ -5,3 +5,7 @@ __pycache__/
 # Worker disparador
 node_modules/
 .wrangler/
+
+# Sidecar de observaciones por corrida: estado efimero, no del repo.
+# Permite reaplicar una corrida sobre un .db fresco si el push es rechazado.
+.observaciones-*.json

@@ -21,6 +21,7 @@ from db import (
 )
 from detector import check_anomaly, has_mature_history, utcnow
 from notifier import send_alert
+from reaplicar import guardar
 from solotodo import best_entity_for_alert, browse_category
 
 PROFILE = os.environ.get("PROFILE", "perfumes")
@@ -35,7 +36,12 @@ def _cfg(name, default):
 
 
 def scan_category(conn, target, store_ids):
-    """Escanea una categoria, persiste precios y devuelve (candidatos, stats)."""
+    """Escanea una categoria, persiste precios y devuelve (candidatos, stats,
+    observaciones).
+
+    Las observaciones se devuelven para poder reaplicarlas sobre un .db fresco
+    si el remoto avanza y el rebase conflictua en el binario. Ver reaplicar.py.
+    """
     category_name = target["name"]
     now = utcnow()
 
@@ -51,7 +57,7 @@ def scan_category(conn, target, store_ids):
     )
     stats = {"categoria": category_name, "productos": 0, "con_historia": 0, "cambios": 0, "candidatos": 0}
     if not products:
-        return [], stats
+        return [], stats, []
 
     ids = [p["product_id"] for p in products]
 
@@ -85,10 +91,11 @@ def scan_category(conn, target, store_ids):
         candidates.append((product, finding, category_name))
 
     upsert_products(conn, products)
-    _, changed = flush_prices(conn, segments, [(p["product_id"], p["price"]) for p in products])
+    observaciones = [(p["product_id"], p["price"]) for p in products]
+    _, changed = flush_prices(conn, segments, observaciones)
 
     stats.update(productos=len(products), cambios=changed, candidatos=len(candidates))
-    return candidates, stats
+    return candidates, stats, observaciones
 
 
 def build_message(product, finding, entity, store_name, category_name):
@@ -107,7 +114,7 @@ def run_once():
     init_db()
     store_ids = list(profile.STORE_IDS.keys())
     started = time.time()
-    all_stats, candidates, errores = [], [], []
+    all_stats, candidates, errores, observaciones = [], [], [], []
 
     # --- Fase 1: escanear y persistir. Se commitea al salir del `with`, o sea
     # ANTES de tocar Telegram: una caida de Telegram ya no puede hacernos
@@ -122,9 +129,10 @@ def run_once():
         for target in profile.CATEGORIES:
             print(f"Escaneando '{target['name']}'...")
             try:
-                found, stats = scan_category(conn, target, store_ids)
+                found, stats, observadas = scan_category(conn, target, store_ids)
                 candidates += found
                 all_stats.append(stats)
+                observaciones += observadas
                 print(
                     f"  {stats['productos']} productos | {stats['con_historia']} con historia "
                     f"| {stats['cambios']} cambios de precio | {stats['candidatos']} candidatos"
@@ -134,6 +142,11 @@ def run_once():
                 print(f"  Error en '{target['name']}':")
                 traceback.print_exc()
         prune_history(conn, keep_days=_cfg("KEEP_HISTORY_DAYS", 90))
+
+    # Siempre, aunque no haya habido cambios: si el remoto avanza y el rebase
+    # conflictua en el .db binario, esto es lo unico que permite reconstruir la
+    # corrida sin repetir peticiones. Ver reaplicar.py.
+    guardar(PROFILE, catalogo_obs=observaciones)
 
     # --- Fase 2: alertar. Transaccion aparte y commit por alerta.
     candidates.sort(key=lambda c: c[1]["ratio"])  # ratio mas bajo = caida mas fuerte
