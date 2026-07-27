@@ -131,22 +131,28 @@ class TestCheckAnomaly(unittest.TestCase):
         self.assertIsNone(check_anomaly({"price": None}, [seg(100000, 240)]))
 
 
-class TestDB(unittest.TestCase):
+class BaseConDB(unittest.TestCase):
+    """Base temporal por test. La repetian seis clases con el mismo cuerpo."""
+
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.tmp.close()
         self.path = Path(self.tmp.name)
-        self._orig = db.DB_PATH
+        self._orig_db_path = db.DB_PATH
         db.DB_PATH = self.path
         db.init_db()
 
     def tearDown(self):
-        db.DB_PATH = self._orig
+        db.DB_PATH = self._orig_db_path
         self.path.unlink(missing_ok=True)
 
     def _hash(self):
+        """Huella del archivo. Sirve para comprobar la propiedad que hace
+        viable commitear el .db: sin cambios de precio no se escribe nada."""
         return hashlib.md5(self.path.read_bytes()).hexdigest()
 
+
+class TestDB(BaseConDB):
     def _observar(self, pares):
         with db.get_conn() as conn:
             segs = db.load_segments(conn, [p for p, _ in pares])
@@ -216,7 +222,7 @@ class TestDB(unittest.TestCase):
         self.assertEqual(recientes, {1: 5000, 2: 7000})
 
 
-class TestPurgaDeCategorias(unittest.TestCase):
+class TestPurgaDeCategorias(BaseConDB):
     """El perfil manda: lo que no vigila, no se guarda.
 
     Reproduce el arrastre real que dejo 1.334 productos de celulares, TV y
@@ -224,12 +230,7 @@ class TestPurgaDeCategorias(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.path = Path(self.tmp.name)
-        self._orig = db.DB_PATH
-        db.DB_PATH = self.path
-        db.init_db()
+        super().setUp()
         with db.get_conn() as conn:
             db.upsert_products(conn, [
                 {"product_id": 1, "name": "Perfume A", "category_id": 780},
@@ -239,10 +240,6 @@ class TestPurgaDeCategorias(unittest.TestCase):
             ])
             db.flush_prices(conn, {}, [(1, 50000), (2, 60000), (3, 300000), (4, 900000)])
             db.record_alert(conn, 3, 150000, "prueba", 9, "http://x")
-
-    def tearDown(self):
-        db.DB_PATH = self._orig
-        self.path.unlink(missing_ok=True)
 
     def _ids(self, tabla, col="product_id"):
         with db.get_conn() as conn:
@@ -396,22 +393,7 @@ class TestObservacionesDe(unittest.TestCase):
         self.assertEqual(observaciones_de([e])[0][3], None)
 
 
-class TestStorePrices(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.path = Path(self.tmp.name)
-        self._orig = db.DB_PATH
-        db.DB_PATH = self.path
-        db.init_db()
-
-    def tearDown(self):
-        db.DB_PATH = self._orig
-        self.path.unlink(missing_ok=True)
-
-    def _hash(self):
-        return hashlib.md5(self.path.read_bytes()).hexdigest()
-
+class TestStorePrices(BaseConDB):
     def _observar(self, obs):
         with db.get_conn() as conn:
             segs = db.load_store_segments(conn, [o[0] for o in obs])
@@ -466,23 +448,17 @@ class TestStorePrices(unittest.TestCase):
         self.assertGreater(d, h)
 
 
-class TestVigilar(unittest.TestCase):
+class TestVigilar(BaseConDB):
     """vigilar() con la red simulada: un producto que falla no debe llevarse
     la corrida ni dejar huecos en el resto de la watchlist."""
 
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.path = Path(self.tmp.name)
-        self._orig_db = db.DB_PATH
-        db.DB_PATH = self.path
-        db.init_db()
+        super().setUp()
         self._orig_get = francotirador.get_entities
 
     def tearDown(self):
         francotirador.get_entities = self._orig_get
-        db.DB_PATH = self._orig_db
-        self.path.unlink(missing_ok=True)
+        super().tearDown()
 
     def test_un_producto_que_falla_no_detiene_al_resto(self):
         def falso(product_id, **kw):
@@ -511,25 +487,13 @@ class TestVigilar(unittest.TestCase):
             self.assertEqual(francotirador.vigilar(conn, [], demora=0), (0, 0, 0, []))
 
 
-class TestElegirWatchlist(unittest.TestCase):
+class TestElegirWatchlist(BaseConDB):
     """La seleccion no debe premiar el ruido por stock.
 
     price_history guarda el precio mas barato ENTRE tiendas: si la tienda barata
     se agota, el precio "sube" sin que nadie lo haya cambiado. Contar tramos
     elegiria justo esos productos.
     """
-
-    def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.path = Path(self.tmp.name)
-        self._orig = db.DB_PATH
-        db.DB_PATH = self.path
-        db.init_db()
-
-    def tearDown(self):
-        db.DB_PATH = self._orig
-        self.path.unlink(missing_ok=True)
 
     def _sembrar(self, product_id, precios):
         with db.get_conn() as conn:
@@ -604,21 +568,9 @@ class TestTiendaRepetida(unittest.TestCase):
         self.assertEqual(observaciones_de(ents)[0][2], 29990)
 
 
-class TestInvarianteUnTramoPorTienda(unittest.TestCase):
+class TestInvarianteUnTramoPorTienda(BaseConDB):
     """El invariante se defiende en la capa de base, no solo en el llamador:
     es de la tabla, no de quien la usa."""
-
-    def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.path = Path(self.tmp.name)
-        self._orig = db.DB_PATH
-        db.DB_PATH = self.path
-        db.init_db()
-
-    def tearDown(self):
-        db.DB_PATH = self._orig
-        self.path.unlink(missing_ok=True)
 
     def _vigentes(self, product_id, store_id):
         with db.get_conn() as conn:
@@ -769,3 +721,38 @@ class TestUrlConfiable(unittest.TestCase):
     def test_observaciones_de_conserva_la_url_legitima(self):
         e = _entidad(9, "29990", url="https://www.falabella.com/x")
         self.assertEqual(observaciones_de([e])[0][4], "https://www.falabella.com/x")
+
+
+class TestInvarianteUnTramoPorProducto(BaseConDB):
+    """Mismo invariante que en store_prices, aplicado al catalogo.
+
+    Hoy browse_category deduplica con su set `emitted`, pero el invariante es
+    de la tabla: si entraran dos filas del mismo producto, open_segment_from()
+    tomaria un tramo vigente arbitrario.
+    """
+
+    def _precios(self, product_id=1):
+        with db.get_conn() as conn:
+            return [r["price"] for r in conn.execute(
+                "SELECT price FROM price_history WHERE product_id=?", (product_id,))]
+
+    def test_producto_repetido_no_abre_dos_tramos(self):
+        with db.get_conn() as conn:
+            _, cambios = db.flush_prices(conn, {}, [(1, 2000), (1, 1000)])
+        self.assertEqual(cambios, 1)
+        self.assertEqual(len(self._precios()), 1)
+
+    def test_gana_el_mas_barato(self):
+        with db.get_conn() as conn:
+            db.flush_prices(conn, {}, [(1, 2000), (1, 1000)])
+        self.assertEqual(self._precios(), [1000])
+
+    def test_repetido_estable_no_reescribe_el_archivo(self):
+        obs = [(1, 2000), (1, 1000)]
+        with db.get_conn() as conn:
+            db.flush_prices(conn, db.load_segments(conn, [1]), obs)
+        antes = self._hash()
+        with db.get_conn() as conn:
+            sc, ca = db.flush_prices(conn, db.load_segments(conn, [1]), obs)
+        self.assertEqual((sc, ca), (1, 0))
+        self.assertEqual(self._hash(), antes)

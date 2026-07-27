@@ -198,8 +198,20 @@ def flush_prices(conn, segments_by_product, observations):
     nuevo. Si el precio sigue igual no se toca nada, y por eso una corrida sin
     novedades deja el archivo intacto y no genera commit.
     """
-    unchanged, changed = 0, []
+    # Una sola observacion por producto, la mas barata. Hoy browse_category ya
+    # deduplica con su set `emitted`, pero el invariante -- un solo tramo
+    # vigente por producto -- es de la TABLA, no del llamador: si entraran dos
+    # filas del mismo producto se abririan dos tramos vigentes y
+    # open_segment_from() tomaria uno arbitrario. Mismo criterio que
+    # flush_store_prices.
+    unicas = {}
     for product_id, price in observations:
+        previa = unicas.get(product_id)
+        if previa is None or price < previa:
+            unicas[product_id] = price
+
+    unchanged, changed = 0, []
+    for product_id, price in unicas.items():
         current = open_segment_from(segments_by_product.get(product_id))
         if current and current["price"] == price:
             unchanged += 1
