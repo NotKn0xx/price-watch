@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="price-watch">
+  <title>price-watch</title>
+
+  <!-- Variante para fondos oscuros. Misma geometria exacta que logo.svg: solo
+       cambian los colores. El hueco de arriba queda TRANSPARENTE para que tome
+       el fondo, y el contorno pasa a claro para conservar la silueta. -->
+  <defs>
+    <path id="gota" d="
+      M 248 86
+      C 298 160 388 226 388 294
+      C 388 364 328 420 256 420
+      C 184 420 124 364 124 294
+      C 124 228 206 164 248 86
+      Z"/>
+    <clipPath id="dentro">
+      <use href="#gota"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#dentro)">
+    <path d="
+      M 78 312
+      C 134 276 186 330 244 310
+      C 306 288 358 328 438 298
+      L 438 480
+      L 78 480
+      Z" fill="#4E9B7C"/>
+  </g>
+
+  <use href="#gota" fill="none" stroke="#E8F0EA" stroke-width="24" stroke-linejoin="round"/>
+</svg>

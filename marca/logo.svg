@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="price-watch">
+  <title>price-watch</title>
+
+  <defs>
+    <!-- Gota cayendo: punta ARRIBA y volumen abajo, que es como se deforma una
+         gota al caer. Con la punta abajo salia un pin de mapa.
+         La punta se desplaza a la izquierda del eje y el flanco derecho va mas
+         lleno: esa asimetria es lo que evita que parezca hecha con una elipse. -->
+    <path id="gota" d="
+      M 248 86
+      C 298 160 388 226 388 294
+      C 388 364 328 420 256 420
+      C 184 420 124 364 124 294
+      C 124 228 206 164 248 86
+      Z"/>
+    <clipPath id="dentro">
+      <use href="#gota"/>
+    </clipPath>
+  </defs>
+
+  <use href="#gota" fill="#EDF2EE"/>
+
+  <!-- El nivel cayo: el liquido llena poco mas de un tercio. La curva no es
+       recta ni simetrica; ahi esta todo el caracter organico. -->
+  <g clip-path="url(#dentro)">
+    <path d="
+      M 78 312
+      C 134 276 186 330 244 310
+      C 306 288 358 328 438 298
+      L 438 480
+      L 78 480
+      Z" fill="#3C7D62"/>
+  </g>
+
+  <use href="#gota" fill="none" stroke="#1E4034" stroke-width="24" stroke-linejoin="round"/>
+</svg>
