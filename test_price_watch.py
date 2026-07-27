@@ -587,8 +587,9 @@ class TestTiendaRepetida(unittest.TestCase):
 
     def test_la_url_es_la_de_la_ficha_barata(self):
         """Hay que mandar a comprar a la barata, no a la cara."""
-        ents = [_entidad(9, "45990", url="cara"), _entidad(9, "29990", url="barata")]
-        self.assertEqual(observaciones_de(ents)[0][4], "barata")
+        ents = [_entidad(9, "45990", url="https://www.falabella.com/cara"),
+                _entidad(9, "29990", url="https://www.falabella.com/barata")]
+        self.assertEqual(observaciones_de(ents)[0][4], "https://www.falabella.com/barata")
 
     def test_no_mezcla_tiendas_distintas(self):
         ents = [_entidad(9, "45990"), _entidad(9, "29990"),
@@ -697,3 +698,74 @@ class TestEmparejamientoConfiable(unittest.TestCase):
 
     def test_si_al_filtrar_queda_una_sola_no_corrobora(self):
         self.assertFalse(self.ok([29990, None, 0]))
+
+
+class TestUrlConfiable(unittest.TestCase):
+    """La url viene de un tercero y el plan es publicarla con el identificador
+    de afiliado pegado. Una url manipulada mandaria lectores a un sitio ajeno
+    CON la firma de la marca encima."""
+
+    def setUp(self):
+        from francotirador import url_confiable
+        self.ok = url_confiable
+
+    def test_dominios_reales_verificados_contra_la_api(self):
+        for url, sid in [
+            ("https://www.falabella.com/falabella-cl/product/123/x", 9),
+            ("https://www.paris.cl/producto-123.html", 11),
+            ("https://simple.ripley.cl/producto-123", 18),
+        ]:
+            with self.subTest(url=url):
+                self.assertTrue(self.ok(url, sid))
+
+    def test_dominio_desnudo_sin_subdominio(self):
+        self.assertTrue(self.ok("https://falabella.com/x", 9))
+
+    def test_rechaza_dominio_ajeno(self):
+        self.assertFalse(self.ok("https://evil.cl/x", 9))
+
+    def test_rechaza_sufijo_enganoso(self):
+        """`falabella.com.evil.cl` pasaria una comparacion por sufijo de texto.
+        Por eso se compara por etiquetas de dominio."""
+        self.assertFalse(self.ok("https://falabella.com.evil.cl/x", 9))
+
+    def test_rechaza_dominio_pegado(self):
+        self.assertFalse(self.ok("https://notfalabella.com/x", 9))
+
+    def test_rechaza_la_tienda_equivocada(self):
+        """Url de Paris declarada como Falabella."""
+        self.assertFalse(self.ok("https://www.paris.cl/x", 9))
+
+    def test_rechaza_http_sin_cifrar(self):
+        self.assertFalse(self.ok("http://www.falabella.com/x", 9))
+
+    def test_rechaza_esquemas_peligrosos(self):
+        for u in ("javascript:alert(1)", "data:text/html,<script>alert(1)</script>",
+                  "file:///etc/passwd"):
+            with self.subTest(url=u):
+                self.assertFalse(self.ok(u, 9))
+
+    def test_rechaza_credenciales_en_la_url(self):
+        """`https://www.falabella.com@evil.cl/` tiene host evil.cl."""
+        self.assertFalse(self.ok("https://www.falabella.com@evil.cl/x", 9))
+
+    def test_rechaza_tienda_desconocida(self):
+        """Ante lo que no se conoce, no publicar."""
+        self.assertFalse(self.ok("https://www.falabella.com/x", 99999))
+
+    def test_rechaza_vacios(self):
+        for u in (None, "", "   "):
+            with self.subTest(url=u):
+                self.assertFalse(self.ok(u, 9))
+
+    def test_observaciones_de_descarta_la_url_pero_conserva_el_precio(self):
+        """El precio sigue siendo valido para la serie; lo que no puede
+        sobrevivir es el enlace."""
+        e = _entidad(9, "29990", url="https://evil.cl/x")
+        fila = observaciones_de([e])[0]
+        self.assertEqual(fila[2], 29990)
+        self.assertIsNone(fila[4])
+
+    def test_observaciones_de_conserva_la_url_legitima(self):
+        e = _entidad(9, "29990", url="https://www.falabella.com/x")
+        self.assertEqual(observaciones_de([e])[0][4], "https://www.falabella.com/x")

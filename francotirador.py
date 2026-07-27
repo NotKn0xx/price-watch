@@ -18,6 +18,7 @@ README ya advierte que ese volumen invita a que bloqueen. Por eso: watchlist de
 """
 
 import time
+from urllib.parse import urlparse
 
 from db import flush_store_prices, load_store_segments
 from solotodo import get_entities
@@ -26,6 +27,63 @@ from solotodo import get_entities
 # (la de Mercado Libre esta cerrada: 403 con token de usuario valido). Ser
 # educado es mas barato que perder el acceso.
 DEMORA = 0.35
+
+
+# Dominios legitimos por tienda, verificados contra la API el 27-07-2026.
+# La clave es el store_id de Solotodo; el valor, los hosts admitidos.
+#
+# Se permite el dominio y sus subdominios (Ripley usa `simple.ripley.cl`, y las
+# tiendas cambian de subdominio sin avisar), pero NUNCA otro dominio.
+DOMINIOS = {
+    9: ("falabella.com",),     # Falabella
+    8147: ("falabella.com",),  # Falabella Marketplace
+    11: ("paris.cl",),         # Paris
+    8148: ("paris.cl",),       # Paris Marketplace
+    18: ("ripley.cl",),        # Ripley
+    8510: ("ripley.cl",),      # Ripley Marketplace
+    260: ("mercadolibre.cl",), # Mercado Libre
+    43: ("lider.cl",),         # Lider
+    8642: ("lider.cl",),       # Lider Marketplace
+    67: ("sodimac.cl",),       # Sodimac
+    5: ("lapolar.cl",),        # La Polar
+    87: ("hites.com",),        # Hites
+    12: ("pcfactory.cl",),     # PC Factory
+    86: ("spdigital.cl",),     # SP Digital
+    45: ("winpy.cl",),         # Winpy
+}
+
+
+def url_confiable(url, store_id):
+    """La URL apunta de verdad al dominio de esa tienda?
+
+    Los datos vienen de un tercero. Hoy esta url solo se guarda, pero el plan es
+    publicarla y pegarle el identificador de afiliado: en ese momento una url
+    manipulada mandaria a los lectores a un sitio ajeno **con la firma de la
+    marca encima**, que es el peor dano posible para un producto cuyo unico
+    valor es que la gente le crea.
+
+    Se valida antes de persistir, no antes de publicar: asi la base no llega a
+    contener nada que no se pueda mostrar.
+
+    Exige https y que el host sea el dominio de la tienda o un subdominio suyo.
+    La comparacion es por etiquetas de dominio, no por sufijo de texto: si no,
+    `falabella.com.evil.cl` pasaria. Tienda desconocida -> False, porque la
+    unica respuesta segura ante lo que no se conoce es no publicarlo.
+    """
+    permitidos = DOMINIOS.get(store_id)
+    if not permitidos or not url:
+        return False
+    try:
+        partes = urlparse(url)
+    except ValueError:
+        return False
+    if partes.scheme != "https" or not partes.hostname:
+        return False
+    host = partes.hostname.lower().rstrip(".")
+    for dominio in permitidos:
+        if host == dominio or host.endswith("." + dominio):
+            return True
+    return False
 
 
 def _a_entero(valor):
@@ -81,12 +139,16 @@ def observaciones_de(entidades, store_ids=None):
         if not precio or precio <= 0:
             continue
 
+        # Url que no se pueda verificar -> se guarda el precio sin ella. El
+        # dato de precio sigue siendo valido y util para la serie; lo que no
+        # puede sobrevivir es un enlace al que despues mandariamos gente.
+        url = e.get("external_url")
         fila = (
             e.get("product_id") or (e.get("product") or {}).get("id"),
             store_id,
             precio,
             _a_entero(registro.get("normal_price")),
-            e.get("external_url"),
+            url if url_confiable(url, store_id) else None,
         )
         # La url tambien viene de la ficha barata: es a donde hay que mandar a
         # quien compra, no a la cara.
