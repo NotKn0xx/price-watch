@@ -493,11 +493,14 @@ class TestVigilar(unittest.TestCase):
         francotirador.get_entities = falso
         vistos = []
         with db.get_conn() as conn:
-            sc, ca, fallidos = francotirador.vigilar(
+            sc, ca, fallidos, obs = francotirador.vigilar(
                 conn, [1, 2, 3], demora=0, al_fallar=lambda p, e: vistos.append(p)
             )
         self.assertEqual((ca, fallidos), (2, 1))
         self.assertEqual(vistos, [2])
+        # Las observaciones se devuelven para poder reaplicarlas sobre un .db
+        # fresco si el rebase conflictua. Ver reaplicar.py.
+        self.assertEqual(len(obs), 2)
 
     def test_watchlist_vacia_no_toca_la_red(self):
         def explota(*a, **k):
@@ -505,7 +508,7 @@ class TestVigilar(unittest.TestCase):
 
         francotirador.get_entities = explota
         with db.get_conn() as conn:
-            self.assertEqual(francotirador.vigilar(conn, [], demora=0), (0, 0, 0))
+            self.assertEqual(francotirador.vigilar(conn, [], demora=0), (0, 0, 0, []))
 
 
 class TestElegirWatchlist(unittest.TestCase):
@@ -561,3 +564,136 @@ class TestElegirWatchlist(unittest.TestCase):
         for pid in range(1, 8):
             self._sembrar(pid, [100000, 80000, 60000])
         self.assertEqual(len(self._elegir(limite=3)), 3)
+
+
+class TestTiendaRepetida(unittest.TestCase):
+    """La API devuelve varias entidades de la MISMA tienda: son fichas
+    distintas del mismo producto en ese comercio. Medido en produccion:
+    Falabella publicaba un Cacharel en 3 fichas a $29.990, $45.990 y $39.990.
+
+    Sin colapsarlas, la serie mezcla fichas y parece oscilacion de precio --
+    el falso "subio" que este modulo existe para evitar.
+    """
+
+    def test_observaciones_de_deja_una_fila_por_tienda(self):
+        ents = [_entidad(9, "45990"), _entidad(9, "29990"), _entidad(9, "39990")]
+        filas = observaciones_de(ents)
+        self.assertEqual(len(filas), 1)
+
+    def test_conserva_la_mas_barata(self):
+        """Es lo que pagaria quien compra en esa tienda."""
+        ents = [_entidad(9, "45990"), _entidad(9, "29990"), _entidad(9, "39990")]
+        self.assertEqual(observaciones_de(ents)[0][2], 29990)
+
+    def test_la_url_es_la_de_la_ficha_barata(self):
+        """Hay que mandar a comprar a la barata, no a la cara."""
+        ents = [_entidad(9, "45990", url="cara"), _entidad(9, "29990", url="barata")]
+        self.assertEqual(observaciones_de(ents)[0][4], "barata")
+
+    def test_no_mezcla_tiendas_distintas(self):
+        ents = [_entidad(9, "45990"), _entidad(9, "29990"),
+                _entidad(11, "21690"), _entidad(11, "29990")]
+        filas = sorted(observaciones_de(ents), key=lambda f: f[1])
+        self.assertEqual([(f[1], f[2]) for f in filas], [(9, 29990), (11, 21690)])
+
+    def test_ignora_las_agotadas_al_elegir_la_barata(self):
+        """Una ficha agotada mas barata no puede ganar: mandaria a una pagina
+        sin stock."""
+        ents = [_entidad(9, "10000", disponible=False), _entidad(9, "29990")]
+        self.assertEqual(observaciones_de(ents)[0][2], 29990)
+
+
+class TestInvarianteUnTramoPorTienda(unittest.TestCase):
+    """El invariante se defiende en la capa de base, no solo en el llamador:
+    es de la tabla, no de quien la usa."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.path = Path(self.tmp.name)
+        self._orig = db.DB_PATH
+        db.DB_PATH = self.path
+        db.init_db()
+
+    def tearDown(self):
+        db.DB_PATH = self._orig
+        self.path.unlink(missing_ok=True)
+
+    def _vigentes(self, product_id, store_id):
+        with db.get_conn() as conn:
+            return conn.execute(
+                "SELECT price FROM store_prices WHERE product_id=? AND store_id=?",
+                (product_id, store_id),
+            ).fetchall()
+
+    def test_dos_observaciones_de_la_misma_tienda_no_abren_dos_tramos(self):
+        with db.get_conn() as conn:
+            sc, ca = db.flush_store_prices(conn, {}, [
+                (1, 9, 1500, None, "cara"),
+                (1, 9, 1000, None, "barata"),
+            ])
+        self.assertEqual(ca, 1)
+        self.assertEqual(len(self._vigentes(1, 9)), 1)
+
+    def test_gana_la_mas_barata_tambien_en_la_capa_de_base(self):
+        with db.get_conn() as conn:
+            db.flush_store_prices(conn, {}, [
+                (1, 9, 1500, None, "cara"),
+                (1, 9, 1000, None, "barata"),
+            ])
+        self.assertEqual(self._vigentes(1, 9)[0]["price"], 1000)
+
+    def test_duplicado_repetido_no_reescribe_el_archivo(self):
+        """Si el duplicado abriera tramo en cada corrida, el .db cambiaria
+        siempre y el repo creceria sin control."""
+        obs = [(1, 9, 1500, None, "cara"), (1, 9, 1000, None, "barata")]
+        with db.get_conn() as conn:
+            db.flush_store_prices(conn, db.load_store_segments(conn, [1]), obs)
+        antes = hashlib.md5(self.path.read_bytes()).hexdigest()
+        with db.get_conn() as conn:
+            sc, ca = db.flush_store_prices(conn, db.load_store_segments(conn, [1]), obs)
+        self.assertEqual((sc, ca), (1, 0))
+        self.assertEqual(hashlib.md5(self.path.read_bytes()).hexdigest(), antes)
+
+
+class TestEmparejamientoConfiable(unittest.TestCase):
+    """Guardia contra comparar productos distintos agrupados bajo una misma
+    ficha de Solotodo. Sin esto, la corroboracion entre tiendas -- el control
+    central contra acusar en falso -- compara peras con manzanas.
+    """
+
+    def setUp(self):
+        from francotirador import emparejamiento_confiable
+        self.ok = emparejamiento_confiable
+
+    def test_precios_parecidos_son_comparables(self):
+        """Mediana medida en produccion: 3%."""
+        self.assertTrue(self.ok([29990, 30990, 29500]))
+
+    def test_rechaza_el_refill_contra_el_frasco(self):
+        """Caso real: Lancome L'Elixir Refill $36.990 vs frasco $132.990."""
+        self.assertFalse(self.ok([36990, 132990, 132990]))
+
+    def test_rechaza_tamanos_distintos_bajo_la_misma_ficha(self):
+        """Caso real: Montblanc Signature $29.990 vs $64.990."""
+        self.assertFalse(self.ok([29990, 64990]))
+
+    def test_una_sola_tienda_no_permite_corroborar(self):
+        """Sin segunda opinion no hay corroboracion: publicar seria justo lo
+        que queremos evitar."""
+        self.assertFalse(self.ok([29990]))
+
+    def test_lista_vacia(self):
+        self.assertFalse(self.ok([]))
+
+    def test_en_el_umbral_exacto_se_acepta(self):
+        self.assertTrue(self.ok([100, 150], dispersion_maxima=0.50))
+
+    def test_pasado_el_umbral_se_rechaza(self):
+        self.assertFalse(self.ok([100, 151], dispersion_maxima=0.50))
+
+    def test_ignora_precios_nulos_o_no_positivos(self):
+        self.assertTrue(self.ok([29990, None, 30990, 0]))
+
+    def test_si_al_filtrar_queda_una_sola_no_corrobora(self):
+        self.assertFalse(self.ok([29990, None, 0]))

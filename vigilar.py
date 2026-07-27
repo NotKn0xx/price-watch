@@ -19,6 +19,7 @@ import os
 import sys
 
 from db import get_conn, init_db, prune_store_prices
+from reaplicar import guardar
 from francotirador import vigilar
 
 
@@ -84,7 +85,7 @@ def main():
             return 0
 
         fallos = []
-        sin_cambio, cambiados, fallidos = vigilar(
+        sin_cambio, cambiados, fallidos, observaciones = vigilar(
             conn, ids, store_ids=store_ids, demora=demora,
             al_fallar=lambda pid, exc: fallos.append((pid, str(exc)[:80])),
         )
@@ -94,6 +95,11 @@ def main():
             "SELECT COUNT(DISTINCT store_id) FROM store_prices"
         ).fetchone()[0]
         total = conn.execute("SELECT COUNT(*) FROM store_prices").fetchone()[0]
+
+    # Siempre, aunque no haya habido cambios: si el remoto avanza y el rebase
+    # conflictua en el .db binario, esto es lo unico que permite reconstruir la
+    # corrida sin repetir una sola peticion. Ver reaplicar.py.
+    guardar(nombre, tienda_obs=observaciones)
 
     print(
         f"[{nombre}] watchlist {len(ids)} · cambios {cambiados} · sin cambio {sin_cambio} "

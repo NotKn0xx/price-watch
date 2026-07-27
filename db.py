@@ -259,8 +259,20 @@ def flush_store_prices(conn, segments_by_key, observations):
     una url vieja es un link roto -- que en un video publicado es peor que no
     tener link.
     """
-    sin_cambio, cambiados = 0, []
+    # Una sola observacion por (producto, tienda): la mas barata. Dos filas de
+    # la misma clave abririan dos tramos vigentes y romperian el invariante de
+    # la tabla -- `load_store_segments` tomaria uno arbitrario y la serie
+    # quedaria mezclando fichas distintas. observaciones_de() ya colapsa, pero
+    # el invariante se defiende aca porque es de la tabla, no del llamador.
+    unicas = {}
     for product_id, store_id, price, normal_price, url in observations:
+        clave = (product_id, store_id)
+        previa = unicas.get(clave)
+        if previa is None or price < previa[0]:
+            unicas[clave] = (price, normal_price, url)
+
+    sin_cambio, cambiados = 0, []
+    for (product_id, store_id), (price, normal_price, url) in unicas.items():
         tramos = segments_by_key.get((product_id, store_id))
         vigente = tramos[-1] if tramos else None
         if vigente and vigente["price"] == price:
