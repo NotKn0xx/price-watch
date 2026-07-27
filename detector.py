@@ -140,12 +140,26 @@ def check_anomaly(
     """Devuelve dict(reason, ratio, source, baseline) o None si no hay nada raro.
 
     `alert_max_ratio` es el gatillo: el precio debe caer a esa fraccion o menos
-    de su referencia. El default 0.50 sale de medir la dispersion de precio
-    ENTRE TIENDAS del mismo producto (mediana 20%, p90 40%, maximo 45%, ningun
-    producto sobre 50% en ningun perfil). Como el precio que seguimos es el
-    minimo entre tiendas, cuando la tienda mas barata se queda sin stock el
-    precio "salta" dentro de ese rango; exigir >50% deja el ruido de quiebres
-    de stock por debajo del umbral.
+    de su referencia. Como el precio que seguimos es el minimo entre tiendas,
+    cuando la tienda mas barata se queda sin stock el precio "salta", y al
+    reponer "cae" de golpe sin que nadie haya cambiado nada. El umbral existe
+    para dejar ese ruido por debajo.
+
+    MEDICION CORREGIDA (27-07-2026, 40-45 productos de perfumes con precios
+    reales POR TIENDA, no agregados):
+
+        mediana 3% · p90 50% · maximo 260% · el 10% supera el 50%
+
+    La medicion anterior anotada aqui ("mediana 20%, p90 40%, maximo 45%, ningun
+    producto sobre 50%") NO se sostiene: la cola es mucho peor. Los extremos son
+    fallos de emparejamiento de Solotodo -- un Lancome L'Elixir *refill* de
+    $36.990 agrupado con el frasco completo de $132.990.
+
+    Aun asi el umbral 0.50 se mantiene, y no por inercia: de 45 productos, solo
+    1 podia cruzarlo por un quiebre de stock, y ese ya quedaba fuera por
+    `min_price`. El riesgo real es ~2%, no cero, y el piso absoluto lo absorbe.
+
+    Si algun dia se baja `min_price`, hay que rehacer esta medicion antes.
     """
     price = product.get("price")
     if not price or price <= 0:

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Antes costaba">
+  <title>Antes costaba</title>
+
+  <!-- Version para avatar de perfil. Distinta del logo a proposito:
+       Instagram y TikTok recortan en circulo y muestran el avatar a 32 px en el
+       feed. El logo suelto queda con demasiado aire dentro del recorte y a ese
+       tamano no se distingue.
+       Aca el fondo es solido y la gota se amplia hasta llenar el marco, que es
+       lo que hace que se lea de lejos. Invertido: la gota clara sobre verde
+       profundo contrasta mas que al reves. -->
+
+  <rect width="512" height="512" fill="#1E4034"/>
+
+  <defs>
+    <!-- Misma geometria que logo.svg, escalada 1.28 sobre su propio centro
+         (256, 253) para llenar el circulo. -->
+    <path id="g" d="
+      M 248 86
+      C 298 160 388 226 388 294
+      C 388 364 328 420 256 420
+      C 184 420 124 364 124 294
+      C 124 228 206 164 248 86
+      Z"/>
+    <clipPath id="dentro">
+      <use href="#g"/>
+    </clipPath>
+  </defs>
+
+  <g transform="translate(256 256) scale(1.28) translate(-256 -253)">
+    <use href="#g" fill="#EDF2EE"/>
+    <g clip-path="url(#dentro)">
+      <path d="
+        M 78 312
+        C 134 276 186 330 244 310
+        C 306 288 358 328 438 298
+        L 438 480
+        L 78 480
+        Z" fill="#3C7D62"/>
+    </g>
+  </g>
+</svg>

@@ -19,12 +19,19 @@ REQUEST_DELAY_SECONDS = 0.3
 MIN_PRICE_CLP = 20000
 
 # Gatillo de alerta: el precio debe caer a la mitad o menos de su referencia.
-# Medido en esta categoria, la dispersion de precio entre tiendas del mismo
-# producto es 20% mediana / 40% p90 / 45% maximo, y ningun producto pasa de
-# 50%. Como seguimos el minimo entre tiendas, un quiebre de stock en la tienda
-# barata "sube" el precio dentro de ese rango; exigir >50% deja todo ese ruido
-# bajo el umbral. Ademas el 9,3% del catalogo esta con >=20% de descuento de
-# campana en cualquier momento, contra 0% sobre 50%.
+# Como seguimos el minimo entre tiendas, un quiebre de stock en la tienda barata
+# "sube" el precio y al reponer lo "baja" de golpe; el umbral existe para dejar
+# ese ruido por debajo. Ademas el 9,3% del catalogo esta con >=20% de descuento
+# de campana en cualquier momento, contra 0% sobre 50%.
+#
+# CORRECCION (27-07-2026): la dispersion entre tiendas que estaba anotada aqui
+# (20% mediana / 40% p90 / 45% maximo, ninguno sobre 50%) se midio sobre datos
+# agregados. Con precios reales POR TIENDA da mediana 3%, p90 50%, maximo 260%,
+# y el 10% supera el 50% -- la cola es mucho peor de lo que decia.
+#
+# El 0.50 se mantiene igual: de 45 productos solo 1 podia cruzarlo por quiebre
+# de stock, y ese ya quedaba fuera por MIN_PRICE_CLP. Riesgo real ~2%.
+# Si se baja MIN_PRICE_CLP, rehacer la medicion antes.
 ALERT_MAX_RATIO = 0.50
 
 MAX_ALERTS_PER_RUN = 5
