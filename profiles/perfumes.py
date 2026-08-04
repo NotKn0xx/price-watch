@@ -8,6 +8,24 @@ STORE_IDS = {
     18: "Ripley",
 }
 
+# Tiendas de la CAPA RAPIDA (run_capas.py). Distinta de STORE_IDS a proposito:
+# esta lista no responde "donde esta el catalogo" sino "donde podemos leer el
+# precio del HTML sin navegador".
+#
+# Medido el 04-08-2026 sobre la categoria 780: de las 30 tiendas parseables del
+# registro, solo estas 3 venden perfumeria. Paris queda fuera porque renderiza en
+# cliente -- sigue cubierta por run.py, que no necesita leer su HTML.
+#
+# Falabella Marketplace (8147) es la novedad: es el ex-Linio, y SERNAC lo ubico
+# primero en reclamos tras el CyberDay 2025 (7,04%), con "cancelaciones
+# unilaterales por error en el precio" como queja principal. O sea que es, por
+# medicion ajena, donde mas se equivocan los precios.
+STORE_IDS_RAPIDA = {
+    9: "Falabella",
+    18: "Ripley",
+    8147: "Falabella Marketplace",
+}
+
 # La categoria tiene ~2515 productos en estas 3 tiendas; con 3 paginas se
 # miraba el 12% del catalogo. 40 paginas cubren todo con holgura.
 MAX_PAGES_PER_CATEGORY = 40

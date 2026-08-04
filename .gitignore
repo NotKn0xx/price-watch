@@ -9,3 +9,9 @@ node_modules/
 # Sidecar de observaciones por corrida: estado efimero, no del repo.
 # Permite reaplicar una corrida sobre un .db fresco si el push es rechazado.
 .observaciones-*.json
+
+# Estado de la capa rapida: cabeceras condicionales, huellas y contador de
+# disparo. Cambia en cada disparo (cada 10 min), asi que en git dejaria un diff
+# por corrida. Se conserva entre corridas con actions/cache; perderlo solo cuesta
+# un ciclo sin peticiones condicionales.
+.estado-rapido-*.json

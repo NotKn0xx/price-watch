@@ -77,6 +77,24 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # Estado de la capa rapida (cabeceras condicionales, huellas, contador de
+      # disparo). NO va en git: cambia en cada disparo y dejaria un diff por
+      # corrida. El runner es efimero, asi que se conserva aca.
+      #
+      # La clave lleva el run_id porque una entrada de cache en Actions es
+      # inmutable: con clave fija el primer guardado gana y nunca se actualiza.
+      # `restore-keys` recupera la mas reciente que empiece con el prefijo.
+      #
+      # Perderlo no rompe nada: sin cabeceras previas el ciclo siguiente pide sin
+      # condicional (200 en vez de 304) y sin huellas marca todo como cambiado
+      # una vez. Se degrada, no falla.
+      - name: Estado de la capa rapida
+        uses: actions/cache@v4
+        with:
+          path: .estado-rapido-*.json
+          key: estado-rapido-${{ github.run_id }}
+          restore-keys: estado-rapido-
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -113,6 +131,47 @@ jobs:
       - name: Celulares
         continue-on-error: true
         run: python run.py
+        env:
+          PROFILE: celulares
+          DB_PATH: price_watch_celulares.db
+          TELEGRAM_BOT_TOKEN: ${{ secrets.CELULARES_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      # --- Capas lenta + rapida -------------------------------------------
+      #
+      # Complementan a run.py, no lo reemplazan. run.py sigue barriendo el
+      # catalogo completo por /products/browse/; esto vigila una watchlist
+      # acotada consultando la tienda directo, que es lo unico capaz de ver una
+      # caida que dura menos que el remuestreo de Solotodo (~4h de mediana).
+      #
+      # Comparten la tabla `alerts`, o sea que comparten presupuesto diario y
+      # cooldown. Es lo que se quiere: un mismo producto no debe alertar dos
+      # veces por venir de dos caminos distintos.
+      #
+      # La capa lenta se dispara sola cuando la watchlist pasa de 12h; el resto
+      # de los ciclos solo corre la rapida (~0,3s cuando las tiendas responden
+      # 304, medido).
+      - name: Capas perfumes
+        continue-on-error: true
+        run: python run_capas.py
+        env:
+          PROFILE: perfumes
+          DB_PATH: price_watch_perfumes.db
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Capas hardware
+        continue-on-error: true
+        run: python run_capas.py
+        env:
+          PROFILE: hardware
+          DB_PATH: price_watch_hardware.db
+          TELEGRAM_BOT_TOKEN: ${{ secrets.HARDWARE_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Capas celulares
+        continue-on-error: true
+        run: python run_capas.py
         env:
           PROFILE: celulares
           DB_PATH: price_watch_celulares.db
