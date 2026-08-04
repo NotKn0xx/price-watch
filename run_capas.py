@@ -142,6 +142,11 @@ def refrescar_watchlist(disparo):
 
     seleccion = _rotar(entidades, disparo)
     print(f"  {len(entidades)} candidatas, {len(seleccion)} con historia esta pasada")
+    if not entidades:
+        # Sin candidatas no hay watchlist, y sin watchlist la capa lenta se
+        # reintenta en cada disparo: 400 pricing_history por perfil cada 10 min
+        # contra una API gratuita ajena. Es un fallo, no un caso normal.
+        print("  ATENCION: 0 candidatas. Revisar STORE_IDS_RAPIDA y CATEGORIES.")
 
     def con_historia(e):
         try:
@@ -184,10 +189,20 @@ def refrescar_watchlist(disparo):
 
     conteo, peticiones = vigilancia.resumen_reparto(watchlist)
     print(
-        f"  watchlist: {len(entradas)} entidades {conteo} "
-        f"| ~{peticiones} peticiones/dia"
+        f"  watchlist: {len(entradas)} entidades {conteo} | de {len(con_datos)} "
+        f"con historia, de {len(seleccion)} pedidas | ~{peticiones} peticiones/dia"
     )
-    return entradas, conteo, peticiones
+    if not entradas:
+        print(
+            f"  ATENCION: watchlist vacia. {len(entidades)} candidatas -> "
+            f"{len(con_datos)} con historia -> 0 en watchlist. La capa lenta se "
+            f"reintentara en cada disparo hasta que esto se arregle."
+        )
+    return entradas, conteo, peticiones, {
+        "candidatas": len(entidades),
+        "con_historia": len(con_datos),
+        "pedidas": len(seleccion),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -456,11 +471,11 @@ def run_once():
     if toca_lenta:
         print(f"Capa lenta ({PROFILE})...")
         try:
-            nueva, conteo, peticiones = refrescar_watchlist(disparo)
+            nueva, conteo, peticiones, diag = refrescar_watchlist(disparo)
             if nueva:
                 watchlist, watchlist_ts = nueva, estado_rapido.sello()
             lenta = {"corrio": True, "entidades": len(nueva), "conteo": conteo,
-                     "peticiones": peticiones}
+                     "peticiones": peticiones, **diag}
         except Exception as exc:
             # Si la capa lenta falla se sigue con la watchlist anterior: vieja es
             # mejor que ninguna, y `vencida()` hara que se reintente igual.
@@ -506,10 +521,19 @@ def _resumen(lenta, stats, enviadas, disparo, duracion):
     lineas = [f"## {PROFILE} - disparo {disparo}", ""]
     if lenta.get("corrio"):
         lineas += [
-            f"**Capa lenta:** {lenta['entidades']} entidades en watchlist "
-            f"{lenta['conteo']} (~{lenta['peticiones']} peticiones/dia)",
+            f"**Capa lenta:** {lenta.get('candidatas', '?')} candidatas -> "
+            f"{lenta.get('con_historia', '?')} con historia -> "
+            f"{lenta['entidades']} en watchlist {lenta['conteo']} "
+            f"(~{lenta['peticiones']} peticiones/dia)",
             "",
         ]
+        if not lenta["entidades"]:
+            lineas += [
+                "> **Watchlist vacia.** La capa lenta se reintentara en cada "
+                "disparo hasta que esto se arregle, gastando 400 pricing_history "
+                "por corrida contra una API gratuita ajena.",
+                "",
+            ]
         # La capa lenta deberia correr 2 veces al dia, no en cada disparo. Si
         # aparece seguido es que el sidecar no esta sobreviviendo entre corridas
         # (actions/cache), y entonces se estan pidiendo 400 pricing_history por
