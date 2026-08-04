@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     baseline INTEGER,
     p10 INTEGER,
     p90 INTEGER,
+    minimo INTEGER,
     percentil REAL,
     volatilidad REAL,
     actualizada TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -135,6 +136,7 @@ def init_db():
     with get_conn() as conn:
         _migrate_price_history(conn)
         conn.executescript(SCHEMA)
+        _migrar_watchlist(conn)
 
 
 def _migrate_price_history(conn):
@@ -461,6 +463,23 @@ def record_alert(conn, product_id, price, reason, store_id=None, url=None):
     )
 
 
+def _migrar_watchlist(conn):
+    """Agrega `minimo` a watchlist si viene de antes de la puerta de rareza.
+
+    El backtest mostro que en hardware la puerta p10 no discrimina -- el ciclo
+    baja tan seguido que su propio p10 cae dentro del ciclo -- y que ahi hay que
+    exigir el minimo historico. Eso obliga a persistirlo.
+    """
+    existe = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='watchlist'"
+    ).fetchone()
+    if not existe:
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(watchlist)")}
+    if "minimo" not in cols:
+        conn.execute("ALTER TABLE watchlist ADD COLUMN minimo INTEGER")
+
+
 def guardar_watchlist(conn, entradas, category_ids=None):
     """Reemplaza la watchlist, escribiendo SOLO las filas que cambiaron.
 
@@ -477,7 +496,7 @@ def guardar_watchlist(conn, entradas, category_ids=None):
 
     campos = (
         "store_id", "product_id", "category_id", "nombre", "url", "metodo",
-        "nivel", "puntaje", "precio", "baseline", "p10", "p90",
+        "nivel", "puntaje", "precio", "baseline", "p10", "p90", "minimo",
         "percentil", "volatilidad",
     )
     altas = cambios = 0

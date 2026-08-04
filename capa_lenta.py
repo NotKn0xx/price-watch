@@ -175,7 +175,7 @@ def historial(entity_id, dias=VENTANA_DIAS, timeout=90):
     return filas
 
 
-def _tramos_disponibles(filas, ahora=None):
+def _tramos_disponibles(filas, ahora=None, window_days=None):
     """Convierte las filas en [(precio, segundos)] contando SOLO tiempo disponible.
 
     Un precio publicado mientras el producto estaba agotado no es un precio al que
@@ -184,12 +184,19 @@ def _tramos_disponibles(filas, ahora=None):
     no habia como distinguir "bajo de precio" de "volvio el stock barato".
     """
     ahora = ahora or _ahora()
+    inicio = ahora - timedelta(days=window_days) if window_days else None
     tramos = []
     for i, fila in enumerate(filas):
         fin = filas[i + 1]["ts"] if i + 1 < len(filas) else ahora
         if not fila["disponible"]:
             continue
-        segundos = max((fin - fila["ts"]).total_seconds(), PESO_MINIMO_SEGUNDOS)
+        # Recorte contra la ventana: un tramo que empezo hace 200 dias solo
+        # aporta lo que cae dentro. Mismo criterio que detector.baseline_from_segments.
+        desde = max(fila["ts"], inicio) if inicio else fila["ts"]
+        hasta = min(fin, ahora)
+        if hasta <= desde:
+            continue
+        segundos = max((hasta - desde).total_seconds(), PESO_MINIMO_SEGUNDOS)
         tramos.append((fila["precio"], segundos))
     return tramos
 
@@ -212,12 +219,12 @@ def _percentil_ponderado(tramos, precio):
     return debajo / total
 
 
-def resumen(filas, precio_actual=None, ahora=None):
+def resumen(filas, precio_actual=None, ahora=None, window_days=VENTANA_DIAS):
     """Estadisticos de una entidad a partir de su serie propia.
 
     Devuelve None si no hay muestras disponibles suficientes.
     """
-    tramos = _tramos_disponibles(filas, ahora)
+    tramos = _tramos_disponibles(filas, ahora, window_days)
     if len(tramos) < MIN_MUESTRAS:
         return None
 

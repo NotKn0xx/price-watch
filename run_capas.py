@@ -179,6 +179,7 @@ def refrescar_watchlist(conn, disparo):
                 "baseline": int(r["baseline"]),
                 "p10": int(r["p10"]),
                 "p90": int(r["p90"]),
+                "minimo": int(r["minimo"]),
                 "percentil": r["percentil"],
                 "volatilidad": r["volatilidad"],
             }
@@ -218,38 +219,51 @@ def _evaluar(fila, precio):
     no un hallazgo. Alertarlo es exactamente el fallo que hundio a Ratonean2:
     confundir el ciclo estacional con un descuento real.
 
-    La segunda puerta es `precio < p10`: mas barato que el 90% de su propia
-    historia, ponderada por tiempo. El Ryzen tiene p10 = $91.900 y el precio ES
-    $91.900, asi que no pasa. El caso de perfumeria que si era real (Bella Soleil,
-    percentil 0,007) tiene p10 = $76.990 contra un precio de $54.990, y pasa
-    holgado.
+    La segunda puerta exige rareza, y cual sirve depende del perfil. Medido con
+    backtest.py sobre 89 dias de pricing_history (ver los umbrales de cada
+    profiles/*.py): en perfumeria basta `precio < p10`, pero en hardware no
+    discrimina nada porque el ciclo baja tan seguido que su propio p10 queda
+    dentro del ciclo, y hay que exigir `precio < minimo`.
 
-    EXIGIR_BAJO_P10 se puede apagar por perfil, pero conviene medir antes de
-    hacerlo: sin esa puerta el bot se vuelve un detector de promociones.
+    ALERT_MAX_RATIO_RAPIDA es aparte de ALERT_MAX_RATIO a proposito: run.py mira
+    la capa normalizada, donde el emparejamiento de Solotodo mete ruido (el Chanel
+    de 50/100/150ml) y necesita un umbral duro. Aca la entidad es un SKU de una
+    tienda y ademas hay puerta de rareza, asi que se puede aflojar el ratio sin
+    perder precision. Medido en perfumeria: 0,50 daba 0,1 alertas/dia y 0,70 da
+    1,1 con 85% de utiles.
     """
     base = fila.get("baseline")
     if not base or not precio:
         return None
 
+    max_ratio = _cfg("ALERT_MAX_RATIO_RAPIDA", _cfg("ALERT_MAX_RATIO", 0.50))
     ratio = precio / base
-    if ratio > _cfg("ALERT_MAX_RATIO", 0.50):
+    if ratio > max_ratio:
         return None
 
     p10 = fila.get("p10")
-    bajo_minimo = bool(p10 and precio < p10)
+    minimo = fila.get("minimo")
+    bajo_p10 = bool(p10 and precio < p10)
+    bajo_minimo = bool(minimo and precio < minimo)
 
-    if _cfg("EXIGIR_BAJO_P10", True):
-        if p10 is None:
-            return None  # sin referencia de percentil no se puede afirmar rareza
-        if not bajo_minimo:
+    puerta = _cfg("PUERTA_RAREZA", "p10")
+    if puerta == "p10":
+        if p10 is None or not bajo_p10:
             return None
+    elif puerta == "minimo":
+        if minimo is None or not bajo_minimo:
+            return None
+    elif puerta != "ninguna":
+        raise ValueError(f"PUERTA_RAREZA desconocida: {puerta!r}")
 
     return {
         "ratio": ratio,
         "caida": round((1 - ratio) * 100),
+        "bajo_p10": bajo_p10,
         "bajo_minimo": bajo_minimo,
         "baseline": base,
         "p10": p10,
+        "puerta": puerta,
     }
 
 
@@ -285,6 +299,8 @@ def _mensaje(fila, precio, hallazgo, clase, cayeron, comparadas):
         f"Cayo {hallazgo['caida']}% vs su mediana de 90d ({fmt(hallazgo['baseline'])})",
     ]
     if hallazgo["bajo_minimo"]:
+        lineas.append("Es su precio mas bajo registrado en 90d")
+    elif hallazgo["bajo_p10"]:
         lineas.append("Por debajo de su p10 historico")
 
     if clase == "aislada":
@@ -346,20 +362,31 @@ def correr_rapida(conn, disparo, cache):
         if hallazgo:
             candidatos.append((fila, r["precio"], hallazgo))
 
-    enviadas = _alertar(conn, candidatos, por_producto)
+    enviadas, motivos = _alertar(conn, candidatos, por_producto)
+    stats["candidatos"] = len(candidatos)
+    stats["suprimidas"] = motivos
     return stats, enviadas, cache
 
 
 def _alertar(conn, candidatos, por_producto):
+    """Envia hasta el cupo. Devuelve (enviadas, motivos de supresion).
+
+    Los motivos se cuentan para poder DECIDIR con datos si algun dia hay que
+    separar el presupuesto de run.py del de esta capa. Hoy no hace falta -- medido
+    sobre 11 dias reales, el pico fue 3 alertas/dia contra un presupuesto de 20,
+    o sea 15% -- pero sin instrumentar no habria como notar que eso cambio.
+    """
+    motivos = {"presupuesto": 0, "cooldown": 0, "envio": 0}
     if not candidatos:
-        return 0
+        return 0, motivos
 
     candidatos.sort(key=lambda c: c[2]["ratio"])
     presupuesto = _cfg("MAX_ALERTS_PER_DAY", 20) - count_alerts_since(conn, 24)
     cupo = min(_cfg("MAX_ALERTS_PER_RUN", 5), max(presupuesto, 0))
     if cupo <= 0:
-        print("  presupuesto diario de alertas agotado")
-        return 0
+        motivos["presupuesto"] = len(candidatos)
+        print(f"  presupuesto diario agotado: {len(candidatos)} candidatos sin enviar")
+        return 0, motivos
 
     recientes = load_recent_alerts(
         conn,
@@ -371,12 +398,14 @@ def _alertar(conn, candidatos, por_producto):
 
     for fila, precio, hallazgo in candidatos:
         if enviadas >= cupo:
-            break
+            motivos["presupuesto"] += 1
+            continue
 
         ya = recientes.get(fila.get("product_id"))
         # Se reabre solo si siguio bajando de forma relevante; un cooldown fijo se
         # comeria justamente la mejor caida.
         if ya is not None and precio > ya * (1 - redrop):
+            motivos["cooldown"] += 1
             continue
 
         clase, cayeron, comparadas = _corroborar(fila, hallazgo, por_producto)
@@ -397,9 +426,10 @@ def _alertar(conn, candidatos, por_producto):
             enviadas += 1
             print("  ALERTA:", (fila.get("nombre") or "")[:60])
         else:
+            motivos["envio"] += 1
             print("  (no se pudo enviar, se reintenta en el proximo disparo)")
 
-    return enviadas
+    return enviadas, motivos
 
 
 # --------------------------------------------------------------------------
@@ -473,6 +503,7 @@ def _resumen(lenta, stats, enviadas, disparo, duracion):
             f"{lenta['conteo']} (~{lenta['peticiones']} peticiones/dia)",
             "",
         ]
+    sup = stats.get("suprimidas") or {}
     lineas += [
         "| Consultadas | Sin cambio | Con cambio | Errores | Ahorro parseo |",
         "|--:|--:|--:|--:|--:|",
@@ -480,8 +511,20 @@ def _resumen(lenta, stats, enviadas, disparo, duracion):
         f"| {stats.get('con_cambio',0)} | {stats.get('errores',0)} "
         f"| {stats.get('ahorro_parseo',0)} |",
         "",
-        f"**{enviadas} alertas** en {duracion:.1f}s.",
+        "| Candidatos | Enviadas | Sin cupo | En cooldown | Fallo de envio |",
+        "|--:|--:|--:|--:|--:|",
+        f"| {stats.get('candidatos',0)} | {enviadas} | {sup.get('presupuesto',0)} "
+        f"| {sup.get('cooldown',0)} | {sup.get('envio',0)} |",
+        "",
+        f"Terminado en {duracion:.1f}s.",
     ]
+    # El presupuesto se comparte con run.py. Hoy no topa (pico medido: 3/dia de
+    # 20), pero si empieza a topar hay que verlo aca antes que en Telegram.
+    if sup.get("presupuesto"):
+        lineas.append(
+            f"\n> Se quedaron {sup['presupuesto']} candidatos sin cupo. Si se "
+            f"repite, separar el presupuesto de run.py."
+        )
     if stats.get("metodo_cambiado"):
         lineas.append(
             f"\n> {stats['metodo_cambiado']} tiendas cambiaron de metodo de "

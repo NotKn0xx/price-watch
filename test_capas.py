@@ -460,41 +460,84 @@ class TestEvaluar(unittest.TestCase):
     """Las dos puertas de la deteccion en la capa rapida."""
 
     def fila(self, **kw):
-        f = {"baseline": 159900, "p10": 91900, "p90": 159900}
+        f = {"baseline": 159900, "p10": 91900, "p90": 159900, "minimo": 91900}
         f.update(kw)
         return f
 
-    def test_caida_real_pasa(self):
+    def _con(self, **cfg):
+        """Ejecuta _evaluar con una configuracion de perfil sustituida."""
         import run_capas
 
+        original = run_capas._cfg
+        run_capas._cfg = lambda n, d: cfg.get(n, d)
+        try:
+            return run_capas._evaluar
+        finally:
+            self.addCleanup(lambda: setattr(run_capas, "_cfg", original))
+
+    def test_caida_real_pasa(self):
         # Bella Soleil: baseline 109.990, p10 76.990, precio 54.990, percentil 0,007.
-        h = run_capas._evaluar(self.fila(baseline=109990, p10=76990), 54990)
+        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="p10")
+        h = ev(self.fila(baseline=109990, p10=76990, minimo=65990), 54990)
         self.assertIsNotNone(h)
         self.assertEqual(h["caida"], 50)
+        self.assertTrue(h["bajo_p10"])
         self.assertTrue(h["bajo_minimo"])
 
     def test_ciclo_promocional_recurrente_no_alerta(self):
-        import run_capas
-
         # REGRESION. AMD Ryzen 5 4500: -43% contra la mediana cruza el umbral de
         # ratio, pero $91.900 es su p10 exacto y aparece en 17 de 61 muestras
         # (percentil 0,257). Es el ciclo, no un hallazgo.
-        self.assertIsNone(run_capas._evaluar(self.fila(), 91900))
+        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="p10")
+        self.assertIsNone(ev(self.fila(), 91900))
+
+    def test_puerta_minimo_es_mas_estricta_que_p10(self):
+        # El backtest mostro que en hardware p10 no discrimina (0% de utiles en
+        # todo umbral) porque el ciclo baja tan seguido que su p10 cae dentro del
+        # ciclo. Un precio bajo el p10 pero sobre el minimo pasa una puerta y no
+        # la otra.
+        fila = self.fila(p10=100000, minimo=80000)
+        self.assertIsNotNone(
+            self._con(ALERT_MAX_RATIO_RAPIDA=0.90, PUERTA_RAREZA="p10")(fila, 90000)
+        )
+        self.assertIsNone(
+            self._con(ALERT_MAX_RATIO_RAPIDA=0.90, PUERTA_RAREZA="minimo")(fila, 90000)
+        )
+
+    def test_puerta_ninguna_deja_pasar_el_ciclo(self):
+        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="ninguna")
+        self.assertIsNotNone(ev(self.fila(), 91900))
+
+    def test_puerta_desconocida_falla_ruidosamente(self):
+        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.90, PUERTA_RAREZA="p11")
+        with self.assertRaises(ValueError):
+            ev(self.fila(), 40000)
+
+    def test_ratio_rapida_no_hereda_el_de_run_py(self):
+        # ALERT_MAX_RATIO=0.50 es de run.py, que mira la capa normalizada y
+        # necesita un umbral duro. La rapida usa el suyo.
+        fila = self.fila(baseline=100000, p10=80000, minimo=80000)
+        self.assertIsNone(
+            self._con(ALERT_MAX_RATIO=0.50, PUERTA_RAREZA="p10")(fila, 65000)
+        )
+        self.assertIsNotNone(
+            self._con(ALERT_MAX_RATIO=0.50, ALERT_MAX_RATIO_RAPIDA=0.70,
+                      PUERTA_RAREZA="p10")(fila, 65000)
+        )
 
     def test_sobre_el_umbral_de_ratio_no_alerta(self):
-        import run_capas
+        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="p10")
+        self.assertIsNone(ev(self.fila(), 120000))
 
-        self.assertIsNone(run_capas._evaluar(self.fila(), 120000))
-
-    def test_sin_p10_no_se_puede_afirmar_rareza(self):
-        import run_capas
-
-        self.assertIsNone(run_capas._evaluar(self.fila(p10=None), 40000))
+    def test_sin_referencia_de_rareza_no_alerta(self):
+        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="p10")
+        self.assertIsNone(ev(self.fila(p10=None), 40000))
+        ev2 = self._con(ALERT_MAX_RATIO_RAPIDA=0.90, PUERTA_RAREZA="minimo")
+        self.assertIsNone(ev2(self.fila(minimo=None), 40000))
 
     def test_sin_baseline_no_evalua(self):
-        import run_capas
-
-        self.assertIsNone(run_capas._evaluar(self.fila(baseline=None), 40000))
+        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="p10")
+        self.assertIsNone(ev(self.fila(baseline=None), 40000))
 
 
 class TestRotacion(unittest.TestCase):

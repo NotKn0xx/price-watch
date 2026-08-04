@@ -55,3 +55,23 @@ ALERT_COOLDOWN_HOURS = 24
 REALERT_ON_EXTRA_DROP = 0.10
 HISTORY_WINDOW_DAYS = 30
 KEEP_HISTORY_DAYS = 90
+
+# --- Capa rapida: umbrales calibrados con backtest.py --------------------
+#
+# Medido el 04-08-2026 sobre 75 entidades y 89 dias:
+#
+#   ratio  puerta   total  raras  dudosas  ciclos  %util  al dia
+#   0.50   p10          0      -        -       -      -     0.0
+#   0.60   p10          1      0        0       1     0%     0.0
+#   0.70   p10          4      1        2       1    75%     0.2
+#   0.75   p10          7      3        3       1    86%     0.3
+#   0.80   minimo       9      5        3       1    89%     0.4
+#   0.90   minimo      42     15      18        9    79%     1.9
+#
+# Esto explica por que celulares nunca alerto: con ALERT_MAX_RATIO=0.50 dispara
+# CERO veces en 89 dias. No estaba roto, estaba fuera de rango.
+#
+# Se elige 0.80 + minimo (89% de utiles) antes que 0.90 (79% pero 1,9/dia): el
+# problema que este proyecto tiene que evitar es el ruido, no la escasez.
+ALERT_MAX_RATIO_RAPIDA = 0.80
+PUERTA_RAREZA = "minimo"

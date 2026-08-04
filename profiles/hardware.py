@@ -77,3 +77,31 @@ ALERT_COOLDOWN_HOURS = 24
 REALERT_ON_EXTRA_DROP = 0.10
 HISTORY_WINDOW_DAYS = 30
 KEEP_HISTORY_DAYS = 90
+
+# --- Capa rapida: umbrales calibrados con backtest.py --------------------
+#
+# Medido el 04-08-2026 sobre 90 entidades y 89 dias:
+#
+#   ratio  puerta   total  raras  dudosas  ciclos  %util  al dia
+#   0.50   p10          2      0        0       2     0%     0.1
+#   0.60   p10          2      0        0       2     0%     0.1
+#   0.70   p10          5      0        0       5     0%     0.2
+#   0.75   p10         12      2        4       6    50%     0.4
+#   0.80   minimo      11      2        2       7    36%     0.4
+#   0.90   minimo      23      7        6      10    57%     0.9
+#
+# ADVERTENCIA: hardware es el perfil con peor senal de los tres, y no por
+# configuracion. Su precision topa en ~57% haga lo que se haga, porque los
+# precios de componentes son ciclicos: bajan y suben de forma regular, asi que
+# "barato contra su propia historia" no aisla anomalias.
+#
+# Se probo la hipotesis de que la tendencia a la baja (una GPU se deprecia)
+# ensuciaba la referencia, recalculando con ventana de 30 dias en vez de 90. NO
+# la mejoro: 57% en ambas. La hipotesis queda descartada, no confirmada.
+#
+# Se deja 0.90 + minimo porque a 57% igual entrega ~0,9 utiles/dia, contra 0% en
+# cualquier umbral mas estricto. Pero cuenta con que ~4 de cada 10 alertas de
+# hardware seran ciclos promocionales, y si molesta, subir a 0.75/p10 baja el
+# volumen a 0,4/dia sin ganar precision.
+ALERT_MAX_RATIO_RAPIDA = 0.90
+PUERTA_RAREZA = "minimo"
