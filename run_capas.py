@@ -35,15 +35,11 @@ import estado_rapido
 import extractores
 import vigilancia
 from db import (
-    actualizar_precio_watchlist,
-    cargar_watchlist,
     count_alerts_since,
     get_conn,
-    guardar_watchlist,
     init_db,
     load_recent_alerts,
     record_alert,
-    watchlist_vencida,
 )
 from notifier import send_alert
 
@@ -110,7 +106,7 @@ def _rotar(entidades, disparo, tope=MAX_HISTORIAS):
     return doble[inicio : inicio + tope]
 
 
-def refrescar_watchlist(conn, disparo):
+def refrescar_watchlist(disparo):
     """Corre la capa lenta y deja la watchlist lista para la rapida.
 
     Usa STORE_IDS_RAPIDA y no STORE_IDS, y la distincion importa: las dos listas
@@ -186,13 +182,12 @@ def refrescar_watchlist(conn, disparo):
             }
         )
 
-    altas, cambios, bajas = guardar_watchlist(conn, entradas, categorias)
     conteo, peticiones = vigilancia.resumen_reparto(watchlist)
     print(
         f"  watchlist: {len(entradas)} entidades {conteo} "
-        f"| +{altas} ~{cambios} -{bajas} | ~{peticiones} peticiones/dia"
+        f"| ~{peticiones} peticiones/dia"
     )
-    return len(entradas), conteo, peticiones
+    return entradas, conteo, peticiones
 
 
 # --------------------------------------------------------------------------
@@ -317,9 +312,8 @@ def _mensaje(fila, precio, hallazgo, clase, cayeron, comparadas):
     return "\n".join(lineas)
 
 
-def correr_rapida(conn, disparo, cache):
+def correr_rapida(conn, disparo, cache, watchlist):
     """Un disparo de la capa rapida. Devuelve (stats, alertas, cache nuevo)."""
-    watchlist = cargar_watchlist(conn)
     if not watchlist:
         return {"consultadas": 0}, 0, cache
 
@@ -359,7 +353,9 @@ def correr_rapida(conn, disparo, cache):
         if not fila:
             continue
 
-        actualizar_precio_watchlist(conn, r["entity_id"], r["precio"])
+        # El ultimo precio visto queda en la watchlist en memoria; se persiste
+        # con el sidecar al final de la corrida.
+        fila["precio"] = r["precio"]
 
         hallazgo = _evaluar(fila, r["precio"])
         if hallazgo:
@@ -440,31 +436,41 @@ def _alertar(conn, candidatos, por_producto):
 def run_once():
     init_db()
     inicio = time.time()
-    disparo, cache = estado_rapido.cargar(PROFILE)
-    disparo += 1
+
+    estado = estado_rapido.cargar(PROFILE)
+    disparo = estado["disparo"] + 1
+    cache = estado["cache"]
+    watchlist = estado["watchlist"]
+    watchlist_ts = estado["watchlist_ts"]
 
     lenta = {"corrio": False}
     stats = {"consultadas": 0}
     enviadas = 0
 
+    toca_lenta = MODO == "lenta" or estado_rapido.vencida(
+        watchlist, watchlist_ts, HORAS_WATCHLIST
+    )
+    if MODO == "rapida":
+        toca_lenta = False
+
+    if toca_lenta:
+        print(f"Capa lenta ({PROFILE})...")
+        try:
+            nueva, conteo, peticiones = refrescar_watchlist(disparo)
+            if nueva:
+                watchlist, watchlist_ts = nueva, estado_rapido.sello()
+            lenta = {"corrio": True, "entidades": len(nueva), "conteo": conteo,
+                     "peticiones": peticiones}
+        except Exception as exc:
+            # Si la capa lenta falla se sigue con la watchlist anterior: vieja es
+            # mejor que ninguna, y `vencida()` hara que se reintente igual.
+            print(f"  error en capa lenta: {exc}")
+            traceback.print_exc()
+
     with get_conn() as conn:
-        toca_lenta = MODO == "lenta" or watchlist_vencida(conn, HORAS_WATCHLIST)
-        if MODO == "rapida":
-            toca_lenta = False
-
-        if toca_lenta:
-            print(f"Capa lenta ({PROFILE})...")
-            try:
-                n, conteo, peticiones = refrescar_watchlist(conn, disparo)
-                lenta = {"corrio": True, "entidades": n, "conteo": conteo,
-                         "peticiones": peticiones}
-            except Exception as exc:
-                print(f"  error en capa lenta: {exc}")
-                traceback.print_exc()
-
         print(f"Capa rapida (disparo {disparo})...")
         try:
-            stats, enviadas, cache = correr_rapida(conn, disparo, cache)
+            stats, enviadas, cache = correr_rapida(conn, disparo, cache, watchlist)
             print(
                 f"  {stats['consultadas']} consultadas | {stats.get('sin_cambio',0)} sin cambio "
                 f"| {stats.get('con_cambio',0)} con cambio | {stats.get('errores',0)} errores"
@@ -478,10 +484,8 @@ def run_once():
             print(f"  error en capa rapida: {exc}")
             traceback.print_exc()
 
-        vigentes = [f["entity_id"] for f in cargar_watchlist(conn)]
-
-    cache = estado_rapido.podar(cache, vigentes)
-    estado_rapido.guardar(PROFILE, disparo, cache)
+    cache = estado_rapido.podar(cache, [f["entity_id"] for f in watchlist])
+    estado_rapido.guardar(PROFILE, disparo, cache, watchlist, watchlist_ts)
 
     duracion = time.time() - inicio
     print(f"Listo en {duracion:.1f}s | {enviadas} alertas")

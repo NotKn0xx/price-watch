@@ -314,94 +314,13 @@ class TestCapaRapida(unittest.TestCase):
         self.assertFalse(r["cambio"])
 
 
-class TestWatchlistDB(unittest.TestCase):
-    """Persistencia de la watchlist. El .db va en git, asi que lo que se prueba
-    aca no es solo que guarde bien: es que NO escriba cuando nada cambio."""
-
-    def setUp(self):
-        import os
-        import tempfile
-
-        import db
-
-        self.tmp = tempfile.mkdtemp()
-        self._original = db.DB_PATH
-        db.DB_PATH = os.path.join(self.tmp, "t.db")
-        self.db = db
-        db.init_db()
-
-    def tearDown(self):
-        import shutil
-
-        self.db.DB_PATH = self._original
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def entrada(self, eid=1, **kw):
-        base = {
-            "entity_id": eid, "store_id": 9, "product_id": 100, "category_id": 780,
-            "nombre": "x", "url": "http://x", "metodo": "ld+json", "nivel": "alta",
-            "puntaje": 1.0, "precio": 50000, "baseline": 100000,
-            "p10": 80000, "p90": 120000, "percentil": 0.1, "volatilidad": 0.2,
-        }
-        base.update(kw)
-        return base
-
-    def test_alta_y_luego_sin_cambios_no_escribe(self):
-        with self.db.get_conn() as conn:
-            altas, cambios, bajas = self.db.guardar_watchlist(conn, [self.entrada()])
-            self.assertEqual((altas, cambios, bajas), (1, 0, 0))
-        with self.db.get_conn() as conn:
-            altas, cambios, bajas = self.db.guardar_watchlist(conn, [self.entrada()])
-            self.assertEqual((altas, cambios, bajas), (0, 0, 0), "reescribir igual ensucia el .db")
-
-    def test_flotantes_se_redondean_para_no_ensuciar_git(self):
-        with self.db.get_conn() as conn:
-            self.db.guardar_watchlist(conn, [self.entrada(percentil=0.1)])
-        with self.db.get_conn() as conn:
-            # Ruido en el cuarto decimal no es un cambio real.
-            _, cambios, _ = self.db.guardar_watchlist(conn, [self.entrada(percentil=0.10004)])
-            self.assertEqual(cambios, 0)
-
-    def test_cambio_real_si_se_escribe(self):
-        with self.db.get_conn() as conn:
-            self.db.guardar_watchlist(conn, [self.entrada()])
-        with self.db.get_conn() as conn:
-            _, cambios, _ = self.db.guardar_watchlist(conn, [self.entrada(nivel="baja")])
-            self.assertEqual(cambios, 1)
-
-    def test_bajas_solo_en_las_categorias_barridas(self):
-        with self.db.get_conn() as conn:
-            self.db.guardar_watchlist(
-                conn,
-                [self.entrada(1, category_id=780), self.entrada(2, category_id=2)],
-            )
-        with self.db.get_conn() as conn:
-            # Se barre solo la 780: la entidad de la categoria 2 debe sobrevivir.
-            _, _, bajas = self.db.guardar_watchlist(conn, [self.entrada(1)], [780])
-            self.assertEqual(bajas, 0)
-            self.assertEqual(len(self.db.cargar_watchlist(conn)), 2)
-
-    def test_baja_cuando_desaparece_de_su_categoria(self):
-        with self.db.get_conn() as conn:
-            self.db.guardar_watchlist(conn, [self.entrada(1), self.entrada(2)])
-        with self.db.get_conn() as conn:
-            _, _, bajas = self.db.guardar_watchlist(conn, [self.entrada(1)], [780])
-            self.assertEqual(bajas, 1)
-
-    def test_actualizar_precio_solo_si_cambio(self):
-        with self.db.get_conn() as conn:
-            self.db.guardar_watchlist(conn, [self.entrada(precio=50000)])
-            self.assertFalse(self.db.actualizar_precio_watchlist(conn, 1, 50000))
-            self.assertTrue(self.db.actualizar_precio_watchlist(conn, 1, 44000))
-
-    def test_watchlist_vacia_esta_vencida(self):
-        with self.db.get_conn() as conn:
-            self.assertTrue(self.db.watchlist_vencida(conn))
-            self.db.guardar_watchlist(conn, [self.entrada()])
-            self.assertFalse(self.db.watchlist_vencida(conn, horas=12))
-
-
 class TestEstadoRapido(unittest.TestCase):
+    """El sidecar guarda watchlist, cabeceras, huellas y contador.
+
+    La watchlist vive aca y NO en el .db por un fallo real en produccion: ver
+    el docstring de estado_rapido.py.
+    """
+
     def setUp(self):
         import os
         import tempfile
@@ -417,37 +336,67 @@ class TestEstadoRapido(unittest.TestCase):
         os.chdir(self.cwd)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_ida_y_vuelta_con_claves_enteras(self):
+    def test_ida_y_vuelta(self):
         import estado_rapido
 
-        estado_rapido.guardar("p", 7, {12: {"etag": "a", "huella": "h"}})
-        disparo, cache = estado_rapido.cargar("p")
-        self.assertEqual(disparo, 7)
+        wl = [{"entity_id": 12, "nivel": "alta", "precio": 5000}]
+        ts = estado_rapido.sello()
+        estado_rapido.guardar("p", 7, {12: {"etag": "a", "huella": "h"}}, wl, ts)
+        e = estado_rapido.cargar("p")
+
+        self.assertEqual(e["disparo"], 7)
         # JSON convierte las claves a texto; los entity_id se usan como enteros.
-        self.assertIn(12, cache)
-        self.assertEqual(cache[12]["etag"], "a")
+        self.assertIn(12, e["cache"])
+        self.assertEqual(e["cache"][12]["etag"], "a")
+        self.assertEqual(len(e["watchlist"]), 1)
+        self.assertEqual(e["watchlist"][0]["entity_id"], 12)
 
     def test_sin_sidecar_arranca_de_cero(self):
         import estado_rapido
 
-        self.assertEqual(estado_rapido.cargar("nada"), (0, {}))
+        e = estado_rapido.cargar("nada")
+        self.assertEqual(e["disparo"], 0)
+        self.assertEqual(e["watchlist"], [])
 
     def test_sidecar_corrupto_no_tumba_la_corrida(self):
         import estado_rapido
 
         estado_rapido.ruta_para("p").write_text("{roto", encoding="utf-8")
-        self.assertEqual(estado_rapido.cargar("p"), (0, {}))
+        self.assertEqual(estado_rapido.cargar("p")["disparo"], 0)
 
-    def test_version_distinta_se_descarta(self):
+    def test_version_vieja_se_descarta(self):
         import json
 
         import estado_rapido
 
+        # v1 guardaba la watchlist en el .db; su sidecar no sirve.
         estado_rapido.ruta_para("p").write_text(
-            json.dumps({"version": 999, "disparo": 5, "cache": {"1": {}}}),
+            json.dumps({"version": 1, "disparo": 5, "cache": {"1": {}}}),
             encoding="utf-8",
         )
-        self.assertEqual(estado_rapido.cargar("p"), (0, {}))
+        self.assertEqual(estado_rapido.cargar("p")["disparo"], 0)
+
+    def test_vencida_sin_watchlist(self):
+        import estado_rapido
+
+        self.assertTrue(estado_rapido.vencida([], None))
+        self.assertTrue(estado_rapido.vencida([{"entity_id": 1}], None))
+
+    def test_vencida_por_antiguedad(self):
+        from datetime import datetime, timedelta, timezone
+
+        import estado_rapido
+
+        wl = [{"entity_id": 1}]
+        fresca = datetime.now(timezone.utc).isoformat()
+        vieja = (datetime.now(timezone.utc) - timedelta(hours=13)).isoformat()
+        self.assertFalse(estado_rapido.vencida(wl, fresca, horas=12))
+        self.assertTrue(estado_rapido.vencida(wl, vieja, horas=12))
+
+    def test_marca_de_tiempo_invalida_cuenta_como_vencida(self):
+        import estado_rapido
+
+        self.assertTrue(estado_rapido.vencida([{"entity_id": 1}], "no-es-fecha"))
 
     def test_podar_descarta_entidades_fuera_de_la_watchlist(self):
         import estado_rapido
@@ -455,89 +404,69 @@ class TestEstadoRapido(unittest.TestCase):
         cache = {1: {"huella": "a"}, 2: {"huella": "b"}, 3: {"huella": "c"}}
         self.assertEqual(set(estado_rapido.podar(cache, [1, 3])), {1, 3})
 
+    def test_la_watchlist_sobrevive_al_reset_del_db(self):
+        """REGRESION del fallo que la saco del .db.
 
-class TestEvaluar(unittest.TestCase):
-    """Las dos puertas de la deteccion en la capa rapida."""
+        En produccion el workflow, ante un push rechazado, hace `git reset --hard`
+        y reconstruye el .db con reaplicar.py, que solo sabe de precios. Cuando la
+        watchlist vivia ahi se perdia entera en cada conflicto y quedaba
+        commiteada VACIA, con el workflow en verde. Verificado en el historial de
+        git: la tabla aparecio con 0 filas y nunca tuvo datos.
 
-    def fila(self, **kw):
-        f = {"baseline": 159900, "p10": 91900, "p90": 159900, "minimo": 91900}
-        f.update(kw)
-        return f
+        El sidecar es independiente del .db, asi que un reset no lo toca.
+        """
+        import estado_rapido
 
-    def _con(self, **cfg):
-        """Ejecuta _evaluar con una configuracion de perfil sustituida."""
-        import run_capas
+        wl = [{"entity_id": i, "nivel": "alta"} for i in range(5)]
+        estado_rapido.guardar("p", 3, {}, wl, estado_rapido.sello())
 
-        original = run_capas._cfg
-        run_capas._cfg = lambda n, d: cfg.get(n, d)
+        # Simula el reset: el .db desaparece por completo.
+        import os
+
+        for f in os.listdir("."):
+            if f.endswith(".db"):
+                os.remove(f)
+
+        self.assertEqual(len(estado_rapido.cargar("p")["watchlist"]), 5)
+
+    def test_el_db_ya_no_declara_la_tabla(self):
+        import re
+
+        import db
+
+        # La palabra "watchlist" sigue apareciendo en el comentario de
+        # store_prices, que es de la capa francotirador y no tiene que ver.
+        # Lo que importa es que no haya CREATE TABLE.
+        self.assertIsNone(
+            re.search(r"CREATE TABLE[^;]*\bwatchlist\b", db.SCHEMA, re.I)
+        )
+
+    def test_init_db_dropea_la_tabla_vieja(self):
+        import os
+        import sqlite3
+
+        import db
+
+        ruta = os.path.join(self.tmp, "viejo.db")
+        con = sqlite3.connect(ruta)
+        con.execute("CREATE TABLE watchlist (entity_id INTEGER PRIMARY KEY)")
+        con.execute("INSERT INTO watchlist VALUES (1)")
+        con.commit()
+        con.close()
+
+        original = db.DB_PATH
+        db.DB_PATH = ruta
         try:
-            return run_capas._evaluar
+            db.init_db()
         finally:
-            self.addCleanup(lambda: setattr(run_capas, "_cfg", original))
+            db.DB_PATH = original
 
-    def test_caida_real_pasa(self):
-        # Bella Soleil: baseline 109.990, p10 76.990, precio 54.990, percentil 0,007.
-        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="p10")
-        h = ev(self.fila(baseline=109990, p10=76990, minimo=65990), 54990)
-        self.assertIsNotNone(h)
-        self.assertEqual(h["caida"], 50)
-        self.assertTrue(h["bajo_p10"])
-        self.assertTrue(h["bajo_minimo"])
-
-    def test_ciclo_promocional_recurrente_no_alerta(self):
-        # REGRESION. AMD Ryzen 5 4500: -43% contra la mediana cruza el umbral de
-        # ratio, pero $91.900 es su p10 exacto y aparece en 17 de 61 muestras
-        # (percentil 0,257). Es el ciclo, no un hallazgo.
-        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="p10")
-        self.assertIsNone(ev(self.fila(), 91900))
-
-    def test_puerta_minimo_es_mas_estricta_que_p10(self):
-        # El backtest mostro que en hardware p10 no discrimina (0% de utiles en
-        # todo umbral) porque el ciclo baja tan seguido que su p10 cae dentro del
-        # ciclo. Un precio bajo el p10 pero sobre el minimo pasa una puerta y no
-        # la otra.
-        fila = self.fila(p10=100000, minimo=80000)
-        self.assertIsNotNone(
-            self._con(ALERT_MAX_RATIO_RAPIDA=0.90, PUERTA_RAREZA="p10")(fila, 90000)
-        )
-        self.assertIsNone(
-            self._con(ALERT_MAX_RATIO_RAPIDA=0.90, PUERTA_RAREZA="minimo")(fila, 90000)
-        )
-
-    def test_puerta_ninguna_deja_pasar_el_ciclo(self):
-        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="ninguna")
-        self.assertIsNotNone(ev(self.fila(), 91900))
-
-    def test_puerta_desconocida_falla_ruidosamente(self):
-        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.90, PUERTA_RAREZA="p11")
-        with self.assertRaises(ValueError):
-            ev(self.fila(), 40000)
-
-    def test_ratio_rapida_no_hereda_el_de_run_py(self):
-        # ALERT_MAX_RATIO=0.50 es de run.py, que mira la capa normalizada y
-        # necesita un umbral duro. La rapida usa el suyo.
-        fila = self.fila(baseline=100000, p10=80000, minimo=80000)
-        self.assertIsNone(
-            self._con(ALERT_MAX_RATIO=0.50, PUERTA_RAREZA="p10")(fila, 65000)
-        )
-        self.assertIsNotNone(
-            self._con(ALERT_MAX_RATIO=0.50, ALERT_MAX_RATIO_RAPIDA=0.70,
-                      PUERTA_RAREZA="p10")(fila, 65000)
-        )
-
-    def test_sobre_el_umbral_de_ratio_no_alerta(self):
-        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="p10")
-        self.assertIsNone(ev(self.fila(), 120000))
-
-    def test_sin_referencia_de_rareza_no_alerta(self):
-        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="p10")
-        self.assertIsNone(ev(self.fila(p10=None), 40000))
-        ev2 = self._con(ALERT_MAX_RATIO_RAPIDA=0.90, PUERTA_RAREZA="minimo")
-        self.assertIsNone(ev2(self.fila(minimo=None), 40000))
-
-    def test_sin_baseline_no_evalua(self):
-        ev = self._con(ALERT_MAX_RATIO_RAPIDA=0.70, PUERTA_RAREZA="p10")
-        self.assertIsNone(ev(self.fila(baseline=None), 40000))
+        con = sqlite3.connect(ruta)
+        tablas = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        con.close()
+        self.assertNotIn("watchlist", tablas)
 
 
 class TestRotacion(unittest.TestCase):

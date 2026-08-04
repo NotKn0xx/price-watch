@@ -1,48 +1,78 @@
-"""Estado efimero de la capa rapida: cabeceras condicionales, huellas y contador.
+"""Estado de las dos capas: watchlist, cabeceras condicionales, huellas, contador.
 
-Va en un sidecar y NO en el .db, por la misma razon que .observaciones-*.json: el
-.db se commitea, y esto cambia en cada disparo. Guardar aca las cabeceras de 300
-entidades cada 10 minutos dejaria un diff binario por corrida y haria crecer el
-repo sin control, que es exactamente el problema que price_history ya resolvio
-comprimiendo tramos.
+Va en un sidecar y NO en el .db, y la segunda parte es la importante.
 
-Como el runner de Actions es efimero, el sidecar se conserva entre corridas con
-actions/cache, no con git. Perderlo no rompe nada: sin cabeceras previas la
-siguiente corrida pide sin condicional (un 200 en vez de un 304) y sin huellas
-previas marca todo como cambiado una vez. Se degrada, no falla.
+POR QUE NO EN EL .db. Primero por volumen: las cabeceras y huellas de 300
+entidades cambian en cada disparo (cada 10 min) y el .db se commitea, asi que
+dejaria un diff binario por corrida.
+
+Pero la razon de fondo la descubrio un fallo real en produccion. La watchlist si
+estuvo en el .db, y aparecio commiteada con CERO filas mientras en local se
+construia bien. El mecanismo:
+
+    git push origin main            # rechazado, el bot pushea cada 10 min
+    git reset --hard FETCH_HEAD     # descarta el .db propio, watchlist incluida
+    python reaplicar.py ...         # solo sabe de precios; su init_db() recrea
+                                    # la tabla vacia, y ESA es la que se commitea
+
+`reaplicar.py` existe porque el .db es binario y git no lo puede fusionar, asi
+que ante un conflicto se descarta el propio y se reaplican las observaciones
+sobre el del remoto. Funciona para los precios porque hay un sidecar con ellos.
+La watchlist no tenia sidecar, asi que se perdia entera en cada push rechazado
+-- y sin ruido: el workflow salia verde y la tabla existia, solo que vacia.
+
+La conclusion general: no metas en el .db nada que la ruta de recuperacion de
+conflictos no sepa reconstruir. La watchlist ademas es estado DERIVADO --
+recomputable desde Solotodo en cualquier momento -- asi que no gana nada con
+estar versionada.
+
+Se conserva entre corridas con actions/cache. Perderlo no rompe nada: la
+watchlist se reconstruye sola (`vencida()` da True sin datos) y las cabeceras
+ausentes solo cuestan un ciclo sin peticiones condicionales.
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = 1
+# v2: la watchlist se movio del .db a este sidecar. Un archivo v1 se descarta.
+VERSION = 2
 
 
 def ruta_para(perfil):
     return Path(f".estado-rapido-{perfil}.json")
 
 
+def _ahora():
+    return datetime.now(timezone.utc)
+
+
 def cargar(perfil):
-    """Devuelve (disparo, cache). Cache es {entity_id: {etag, last_modified, huella}}."""
+    """Devuelve el estado completo como dict, o uno vacio si no hay o no sirve."""
+    vacio = {"disparo": 0, "cache": {}, "watchlist": [], "watchlist_ts": None}
     ruta = ruta_para(perfil)
     if not ruta.exists():
-        return 0, {}
+        return vacio
     try:
         datos = json.loads(ruta.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         # Un sidecar corrupto no puede tumbar la corrida: se descarta y se empieza
         # de cero, que es un estado valido.
-        return 0, {}
+        return vacio
 
     if datos.get("version") != VERSION:
-        return 0, {}
+        return vacio
 
-    # Las claves de JSON son texto; los entity_id se usan como enteros.
-    cache = {int(k): v for k, v in (datos.get("cache") or {}).items()}
-    return int(datos.get("disparo") or 0), cache
+    return {
+        "disparo": int(datos.get("disparo") or 0),
+        # Las claves de JSON son texto; los entity_id se usan como enteros.
+        "cache": {int(k): v for k, v in (datos.get("cache") or {}).items()},
+        "watchlist": datos.get("watchlist") or [],
+        "watchlist_ts": datos.get("watchlist_ts"),
+    }
 
 
-def guardar(perfil, disparo, cache):
+def guardar(perfil, disparo, cache, watchlist=None, watchlist_ts=None):
     """Vuelca el estado. `cache` puede venir con claves int o str."""
     ruta = ruta_para(perfil)
     ruta.write_text(
@@ -51,12 +81,36 @@ def guardar(perfil, disparo, cache):
                 "version": VERSION,
                 "disparo": int(disparo),
                 "cache": {str(k): v for k, v in cache.items()},
+                "watchlist": watchlist or [],
+                "watchlist_ts": watchlist_ts,
             },
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
     return ruta
+
+
+def vencida(watchlist, watchlist_ts, horas=12):
+    """True si la watchlist no existe o quedo mas vieja que `horas`.
+
+    Es lo que hace que la capa lenta se dispare sola cuando corresponde, sin
+    depender de un cron aparte que puede no ejecutarse.
+    """
+    if not watchlist or not watchlist_ts:
+        return True
+    try:
+        cuando = datetime.fromisoformat(str(watchlist_ts).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if cuando.tzinfo is None:
+        cuando = cuando.replace(tzinfo=timezone.utc)
+    return _ahora() - cuando >= timedelta(hours=horas)
+
+
+def sello():
+    """Marca de tiempo para acompanar una watchlist recien construida."""
+    return _ahora().isoformat()
 
 
 def podar(cache, entity_ids):
