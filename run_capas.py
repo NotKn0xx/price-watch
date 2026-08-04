@@ -510,6 +510,17 @@ def _resumen(lenta, stats, enviadas, disparo, duracion):
             f"{lenta['conteo']} (~{lenta['peticiones']} peticiones/dia)",
             "",
         ]
+        # La capa lenta deberia correr 2 veces al dia, no en cada disparo. Si
+        # aparece seguido es que el sidecar no esta sobreviviendo entre corridas
+        # (actions/cache), y entonces se estan pidiendo 400 pricing_history por
+        # perfil cada 10 minutos contra una API gratuita ajena.
+        if disparo > 3:
+            lineas += [
+                "> La capa lenta corrio en un disparo tardio. Deberia hacerlo "
+                "cada ~12h. Si se repite, revisar que el paso *Estado de la capa "
+                "rapida* este restaurando el sidecar.",
+                "",
+            ]
     sup = stats.get("suprimidas") or {}
     lineas += [
         "| Consultadas | Sin cambio | Con cambio | Errores | Ahorro parseo |",
