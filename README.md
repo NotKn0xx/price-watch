@@ -58,6 +58,70 @@ descuentos declarados de 20% o mas, contra 9,3% en perfumes).
 | `profiles/` | Que categorias y tiendas mirar, y con que umbrales |
 | `test_price_watch.py` | Tests de deteccion y almacenamiento |
 
+Y el subsistema de dos capas, que corre en paralelo a `run.py`:
+
+| Archivo | Rol |
+|---|---|
+| `capa_lenta.py` | `/entities/` + `/pricing_history/`: baseline, percentil, volatilidad |
+| `capa_rapida.py` | Consulta la tienda directo, con peticion condicional |
+| `extractores.py` | Lee el precio del HTML. 30 tiendas validadas |
+| `vigilancia.py` | Que vigilar y cada cuanto |
+| `estado_rapido.py` | Sidecar efimero: cabeceras, huellas, contador |
+| `run_capas.py` | Orquestacion de ambas capas |
+| `backtest.py` | Calibra umbrales sobre la historia ya existente |
+| `test_capas.py` | Tests de las dos capas |
+
+## Por que dos capas
+
+Solotodo remuestrea cada ~4h (mediana 4,06h / p90 13,2h, medido). El Worker de
+`cloudflare-cron` dispara cada 10 min. O sea que `run.py` consulta 24 veces mas
+seguido que lo que su fuente cambia.
+
+La **capa lenta** aporta lo que solo Solotodo tiene: hasta 393 dias de historia
+por entidad y cobertura de 142 tiendas. Corre cada ~12h y produce la watchlist.
+
+La **capa rapida** aporta lo unico que Solotodo no puede dar, que es latencia:
+consulta la tienda directo cada 10 min sobre esa watchlist acotada.
+
+La diferencia de fondo es que la capa lenta lee `/entities/` y no
+`/products/browse/`. Una **entidad** es una tienda y un SKU; un **producto** es
+la opinion de Solotodo sobre que SKUs son lo mismo, y esa opinion falla: medido
+sobre 52 productos de perfumeria, "Chanel Allure Homme Sport" agrupa 50ml, 100ml
+y 150ml con precios de $123.200 a $192.500. Siguiendo el minimo agregado, un
+quiebre de stock del de 150ml se ve como una caida del 36% que nunca ocurrio.
+
+## Las dos puertas de la capa rapida
+
+Un ratio bajo contra la mediana no basta. Caso real: AMD Ryzen 5 4500 a $91.900
+contra mediana de $159.900 cruza cualquier umbral, pero ese precio aparece en 17
+de 61 muestras. Es el ciclo promocional, no un hallazgo.
+
+La segunda puerta exige **rareza**: `precio < p10`, mas barato que el 90% de su
+propia historia ponderada por tiempo.
+
+### La ventana de referencia importa mas que el umbral
+
+Con 90 dias hardware saturaba en 57% de precision hicieramos lo que hicieramos.
+Con 270:
+
+| ventana | combo | eventos | utiles | ciclos | precision |
+|---|---|--:|--:|--:|--:|
+| 90d | 0.90 + minimo | 23 | 13 | 10 | 57% |
+| 270d | 0.70 + p10 | 23 | 20 | 3 | **87%** |
+
+En 90 dias solo caben 2-3 ciclos, asi que el fondo del ciclo queda **dentro**
+del p10. Con 270 entran muchos, el p10 baja por debajo del fondo habitual, y
+solo lo excepcional lo cruza.
+
+Se probaron y descartaron otras dos explicaciones: la tendencia a la baja de los
+componentes (ventana de 30 dias no mejoro nada) y la corroboracion cruzada
+(sobre 70 productos con >=3 tiendas, la caida aislada dio 48% de utiles y la
+parcial 39%: no discrimina).
+
+Los umbrales de cada perfil salen de `backtest.py`, que recorre
+`pricing_history` con el baseline calculado **solo con datos anteriores** a cada
+punto. Sin esa causalidad el backtest se miente solo.
+
 ## El historial se guarda comprimido
 
 `price_history` guarda **un tramo por precio constante**, no una fila por
