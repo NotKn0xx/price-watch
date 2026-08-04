@@ -77,5 +77,10 @@ KEEP_HISTORY_DAYS = 90
 # vuelve util (1,1/dia) sin que la precision caiga: 85%.
 #
 # En 0.75 la precision cae a 69%, asi que ahi esta el limite.
+# Ventana de referencia. Ver la nota en hardware.py: la ventana corta era el
+# problema real. Perfumeria mejora poco (85% -> 91%) porque sus entidades tienen
+# ~119 dias de historia disponible, asi que 270 equivale a "toda la que hay".
+VENTANA_REFERENCIA_DIAS = 270
+
 ALERT_MAX_RATIO_RAPIDA = 0.70
 PUERTA_RAREZA = "p10"

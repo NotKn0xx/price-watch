@@ -47,6 +47,10 @@ HILOS = 6
 # compara contra el precio reciente y no contra el de hace tres meses.
 VENTANA = int(os.environ.get("VENTANA", str(capa_lenta.VENTANA_DIAS)))
 
+# Cuanta historia se BAJA, que puede ser mas que la ventana de referencia: para
+# probar ventanas largas hay que tener las muestras antes de poder recortarlas.
+HISTORIA = int(os.environ.get("HISTORIA", str(max(VENTANA, capa_lenta.VENTANA_DIAS))))
+
 # Muestras minimas de pasado antes de empezar a evaluar. Con menos, el baseline
 # se calcula sobre casi nada y dispara por ruido.
 MIN_PASADO = 12
@@ -180,7 +184,7 @@ def correr(perfil, tope=MUESTRA):
 
     def traer(e):
         try:
-            return capa_lenta.historial(e["entity_id"], dias=capa_lenta.VENTANA_DIAS)
+            return capa_lenta.historial(e["entity_id"], dias=HISTORIA)
         except requests.RequestException:
             return []
 

@@ -73,5 +73,16 @@ KEEP_HISTORY_DAYS = 90
 #
 # Se elige 0.80 + minimo (89% de utiles) antes que 0.90 (79% pero 1,9/dia): el
 # problema que este proyecto tiene que evitar es el ruido, no la escasez.
-ALERT_MAX_RATIO_RAPIDA = 0.80
-PUERTA_RAREZA = "minimo"
+# Ventana de referencia larga (ver hardware.py). Remedido sobre 399 dias:
+#
+#   0.70+p10   19 eventos  74% util  0.2/dia
+#   0.75+p10   53 eventos  75% util  0.6/dia   <- elegida
+#   0.80+min   68 eventos  60% util  0.7/dia
+#
+# Se prefiere 0.75+p10 sobre el 0.80+minimo de la calibracion anterior: aquel
+# media 89% pero sobre 9 eventos, muestra demasiado chica para confiar en el
+# porcentaje. 53 eventos al 75% es una medicion mas solida y mas volumen.
+VENTANA_REFERENCIA_DIAS = 270
+
+ALERT_MAX_RATIO_RAPIDA = 0.75
+PUERTA_RAREZA = "p10"

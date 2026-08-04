@@ -126,6 +126,7 @@ def refrescar_watchlist(conn, disparo):
     store_ids = list(_cfg("STORE_IDS_RAPIDA", profile.STORE_IDS).keys())
     min_precio = _cfg("MIN_PRICE_CLP", vigilancia.MIN_PRECIO_CLP)
     categorias = [c["id"] for c in profile.CATEGORIES]
+    ventana = _cfg("VENTANA_REFERENCIA_DIAS", capa_lenta.VENTANA_DIAS)
 
     entidades = []
     vistas = set()
@@ -148,10 +149,10 @@ def refrescar_watchlist(conn, disparo):
 
     def con_historia(e):
         try:
-            filas = capa_lenta.historial(e["entity_id"], dias=capa_lenta.VENTANA_DIAS)
+            filas = capa_lenta.historial(e["entity_id"], dias=ventana)
         except requests.RequestException:
             return None
-        resumen = capa_lenta.resumen(filas, e["precio"])
+        resumen = capa_lenta.resumen(filas, e["precio"], window_days=ventana)
         if not resumen:
             return None
         return {**e, "resumen": resumen, "parseable": True}
@@ -264,6 +265,7 @@ def _evaluar(fila, precio):
         "baseline": base,
         "p10": p10,
         "puerta": puerta,
+        "ventana": _cfg("VENTANA_REFERENCIA_DIAS", capa_lenta.VENTANA_DIAS),
     }
 
 
@@ -296,10 +298,11 @@ def _mensaje(fila, precio, hallazgo, clase, cayeron, comparadas):
         f"[{PROFILE}] {fila.get('nombre') or 'producto'}",
         "",
         f"{fmt(precio)} en {tienda}",
-        f"Cayo {hallazgo['caida']}% vs su mediana de 90d ({fmt(hallazgo['baseline'])})",
+        f"Cayo {hallazgo['caida']}% vs su mediana de {hallazgo['ventana']}d "
+        f"({fmt(hallazgo['baseline'])})",
     ]
     if hallazgo["bajo_minimo"]:
-        lineas.append("Es su precio mas bajo registrado en 90d")
+        lineas.append(f"Es su precio mas bajo registrado en {hallazgo['ventana']}d")
     elif hallazgo["bajo_p10"]:
         lineas.append("Por debajo de su p10 historico")
 

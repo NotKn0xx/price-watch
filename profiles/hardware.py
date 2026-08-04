@@ -103,5 +103,31 @@ KEEP_HISTORY_DAYS = 90
 # cualquier umbral mas estricto. Pero cuenta con que ~4 de cada 10 alertas de
 # hardware seran ciclos promocionales, y si molesta, subir a 0.75/p10 baja el
 # volumen a 0,4/dia sin ganar precision.
-ALERT_MAX_RATIO_RAPIDA = 0.90
-PUERTA_RAREZA = "minimo"
+# LA VENTANA ERA EL PROBLEMA, no el umbral.
+#
+# Con 90 dias hardware saturaba en 57% de precision hicieramos lo que
+# hicieramos. Remedido con ventana de 270 dias sobre 400 de historia:
+#
+#   ventana   combo         eventos  utiles  ciclos  precision
+#   90d       0.90+minimo        23      13      10        57%
+#   270d      0.70+p10           23      20       3        87%
+#
+# Mismo volumen de eventos, 20 utiles en vez de 13 y 3 ruidos en vez de 10.
+#
+# El mecanismo: con 90 dias solo caben 2-3 ciclos promocionales, asi que el
+# fondo del ciclo queda DENTRO del p10 y no hay como distinguirlo. Con 270 dias
+# entran muchos ciclos, el p10 baja por debajo del fondo habitual, y solo lo
+# excepcional lo cruza.
+#
+# Corolario: la puerta `minimo` era un parche para una ventana corta. Con
+# historia suficiente los tres perfiles convergen en p10.
+#
+# Se probaron y DESCARTARON otras dos explicaciones del techo:
+#   - Tendencia a la baja de los componentes: recalcular con ventana de 30 dias
+#     no mejoro nada (57% igual).
+#   - Corroboracion cruzada: sobre 70 productos con >=3 tiendas, la caida
+#     aislada dio 48% de utiles y la parcial 39%. No discrimina.
+VENTANA_REFERENCIA_DIAS = 270
+
+ALERT_MAX_RATIO_RAPIDA = 0.70
+PUERTA_RAREZA = "p10"
