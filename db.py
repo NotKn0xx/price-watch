@@ -72,10 +72,48 @@ CREATE TABLE IF NOT EXISTS store_prices (
     last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Watchlist de la capa rapida: que entidades se vigilan directo en la tienda y
+-- con que frecuencia. La produce la capa lenta y la consume la rapida.
+--
+-- La clave es entity_id, no product_id, y esa es la diferencia que justifica
+-- todo: una entidad es UNA tienda y UN SKU. El product_id de Solotodo agrupa
+-- variantes distintas -- medido: "Chanel Allure Homme Sport" junta 50ml, 100ml y
+-- 150ml con precios de $123.200 a $192.500 -- asi que seguir por producto vuelve
+-- a meter el ruido que esta capa existe para eliminar. Se guarda igual, pero
+-- solo para poder agrupar entre tiendas al corroborar.
+--
+-- baseline/p10/p90 vienen de pricing_history y son la referencia contra la que
+-- la capa rapida evalua sin volver a pedir historia en cada disparo.
+--
+-- Los flotantes se guardan redondeados a 3 decimales a proposito: el .db va en
+-- git, y sin eso cada recalculo de la capa lenta produciria un diff por ruido en
+-- el decimo decimal.
+CREATE TABLE IF NOT EXISTS watchlist (
+    entity_id INTEGER PRIMARY KEY,
+    store_id INTEGER NOT NULL,
+    product_id INTEGER,
+    category_id INTEGER,
+    nombre TEXT,
+    url TEXT,
+    metodo TEXT,
+    nivel TEXT NOT NULL,
+    puntaje REAL,
+    precio INTEGER,
+    baseline INTEGER,
+    p10 INTEGER,
+    p90 INTEGER,
+    minimo INTEGER,
+    percentil REAL,
+    volatilidad REAL,
+    actualizada TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_price_history_product ON price_history(product_id, first_seen);
 CREATE INDEX IF NOT EXISTS idx_alerts_product ON alerts(product_id, sent_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_sent ON alerts(sent_at);
 CREATE INDEX IF NOT EXISTS idx_store_prices ON store_prices(product_id, store_id, first_seen);
+CREATE INDEX IF NOT EXISTS idx_watchlist_nivel ON watchlist(nivel, puntaje);
+CREATE INDEX IF NOT EXISTS idx_watchlist_producto ON watchlist(product_id);
 """
 
 
@@ -98,6 +136,7 @@ def init_db():
     with get_conn() as conn:
         _migrate_price_history(conn)
         conn.executescript(SCHEMA)
+        _migrar_watchlist(conn)
 
 
 def _migrate_price_history(conn):
@@ -422,6 +461,134 @@ def record_alert(conn, product_id, price, reason, store_id=None, url=None):
         "INSERT INTO alerts (product_id, price, reason, store_id, url) VALUES (?, ?, ?, ?, ?)",
         (product_id, price, reason, store_id, url),
     )
+
+
+def _migrar_watchlist(conn):
+    """Agrega `minimo` a watchlist si viene de antes de la puerta de rareza.
+
+    El backtest mostro que en hardware la puerta p10 no discrimina -- el ciclo
+    baja tan seguido que su propio p10 cae dentro del ciclo -- y que ahi hay que
+    exigir el minimo historico. Eso obliga a persistirlo.
+    """
+    existe = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='watchlist'"
+    ).fetchone()
+    if not existe:
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(watchlist)")}
+    if "minimo" not in cols:
+        conn.execute("ALTER TABLE watchlist ADD COLUMN minimo INTEGER")
+
+
+def guardar_watchlist(conn, entradas, category_ids=None):
+    """Reemplaza la watchlist, escribiendo SOLO las filas que cambiaron.
+
+    Un UPDATE incondicional de 300 filas dejaria un diff en el .db en cada pasada
+    de la capa lenta aunque nada se hubiera movido, y el .db va en git. Mismo
+    criterio que flush_prices: se compara antes de escribir.
+
+    Devuelve (altas, cambios, bajas).
+    """
+    previas = {
+        r["entity_id"]: dict(r)
+        for r in conn.execute("SELECT * FROM watchlist").fetchall()
+    }
+
+    campos = (
+        "store_id", "product_id", "category_id", "nombre", "url", "metodo",
+        "nivel", "puntaje", "precio", "baseline", "p10", "p90", "minimo",
+        "percentil", "volatilidad",
+    )
+    altas = cambios = 0
+    vistos = set()
+
+    for e in entradas:
+        eid = e["entity_id"]
+        vistos.add(eid)
+        fila = {c: e.get(c) for c in campos}
+        for c in ("puntaje", "percentil", "volatilidad"):
+            if fila[c] is not None:
+                fila[c] = round(float(fila[c]), 3)
+
+        anterior = previas.get(eid)
+        if anterior is None:
+            conn.execute(
+                f"INSERT INTO watchlist (entity_id, {','.join(campos)}) "
+                f"VALUES (?, {','.join('?' * len(campos))})",
+                (eid, *(fila[c] for c in campos)),
+            )
+            altas += 1
+            continue
+
+        if all(anterior.get(c) == fila[c] for c in campos):
+            continue  # identica: no se toca, el .db queda byte a byte igual
+
+        conn.execute(
+            f"UPDATE watchlist SET {','.join(c + '=?' for c in campos)}, "
+            f"actualizada=CURRENT_TIMESTAMP WHERE entity_id=?",
+            (*(fila[c] for c in campos), eid),
+        )
+        cambios += 1
+
+    # Bajas: solo dentro de las categorias recien barridas. Sin ese filtro, correr
+    # la capa lenta sobre una categoria borraria la watchlist de las demas.
+    sobrantes = [
+        eid for eid, r in previas.items()
+        if eid not in vistos
+        and (category_ids is None or r.get("category_id") in set(category_ids))
+    ]
+    for chunk in _chunks(sobrantes, _CHUNK):
+        conn.execute(
+            f"DELETE FROM watchlist WHERE entity_id IN ({','.join('?' * len(chunk))})",
+            tuple(chunk),
+        )
+
+    return altas, cambios, len(sobrantes)
+
+
+def cargar_watchlist(conn, niveles=None):
+    """La watchlist vigente, como lista de dicts lista para vigilancia.py."""
+    sql = "SELECT * FROM watchlist"
+    params = ()
+    if niveles:
+        sql += f" WHERE nivel IN ({','.join('?' * len(niveles))})"
+        params = tuple(niveles)
+    sql += " ORDER BY puntaje DESC"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def actualizar_precio_watchlist(conn, entity_id, precio):
+    """Deja el ultimo precio visto por la capa rapida como referencia.
+
+    Solo escribe si cambio: es la misma disciplina de no ensuciar el .db, y aca
+    importa mas porque la capa rapida corre cada 10 minutos.
+    """
+    fila = conn.execute(
+        "SELECT precio FROM watchlist WHERE entity_id=?", (entity_id,)
+    ).fetchone()
+    if fila is None or fila["precio"] == precio:
+        return False
+    conn.execute(
+        "UPDATE watchlist SET precio=? WHERE entity_id=?", (precio, entity_id)
+    )
+    return True
+
+
+def watchlist_vencida(conn, horas=12):
+    """True si la watchlist no existe o quedo mas vieja que `horas`.
+
+    Es lo que hace que la capa lenta se dispare sola cuando corresponde, sin
+    depender de un cron aparte que puede no ejecutarse.
+    """
+    fila = conn.execute(
+        "SELECT MAX(actualizada) AS ultima, COUNT(*) AS n FROM watchlist"
+    ).fetchone()
+    if not fila or not fila["n"] or not fila["ultima"]:
+        return True
+    vieja = conn.execute(
+        "SELECT ? < datetime('now', ?) AS vencida", (fila["ultima"], f"-{horas} hours")
+    ).fetchone()
+    return bool(vieja["vencida"])
 
 
 def _chunks(seq, n):

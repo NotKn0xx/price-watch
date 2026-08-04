@@ -8,6 +8,24 @@ STORE_IDS = {
     18: "Ripley",
 }
 
+# Tiendas de la CAPA RAPIDA (run_capas.py). Distinta de STORE_IDS a proposito:
+# esta lista no responde "donde esta el catalogo" sino "donde podemos leer el
+# precio del HTML sin navegador".
+#
+# Medido el 04-08-2026 sobre la categoria 780: de las 30 tiendas parseables del
+# registro, solo estas 3 venden perfumeria. Paris queda fuera porque renderiza en
+# cliente -- sigue cubierta por run.py, que no necesita leer su HTML.
+#
+# Falabella Marketplace (8147) es la novedad: es el ex-Linio, y SERNAC lo ubico
+# primero en reclamos tras el CyberDay 2025 (7,04%), con "cancelaciones
+# unilaterales por error en el precio" como queja principal. O sea que es, por
+# medicion ajena, donde mas se equivocan los precios.
+STORE_IDS_RAPIDA = {
+    9: "Falabella",
+    18: "Ripley",
+    8147: "Falabella Marketplace",
+}
+
 # La categoria tiene ~2515 productos en estas 3 tiendas; con 3 paginas se
 # miraba el 12% del catalogo. 40 paginas cubren todo con holgura.
 MAX_PAGES_PER_CATEGORY = 40
@@ -40,3 +58,24 @@ ALERT_COOLDOWN_HOURS = 24
 REALERT_ON_EXTRA_DROP = 0.10
 HISTORY_WINDOW_DAYS = 30
 KEEP_HISTORY_DAYS = 90
+
+# --- Capa rapida: umbrales calibrados con backtest.py --------------------
+#
+# Medido el 04-08-2026 sobre 60 entidades y 89 dias de pricing_history, con el
+# baseline calculado de forma causal (solo pasado en cada punto):
+#
+#   ratio  puerta   total  raras  dudosas  ciclos  %util  al dia
+#   0.50   p10          2      1        1       0   100%     0.1
+#   0.50   ninguna      4      1        1       2    50%     0.2
+#   0.60   p10          6      2        4       0   100%     0.3
+#   0.70   p10         20      4       13       3    85%     1.1
+#   0.75   p10         26      5       13       8    69%     1.5
+#
+# El 0.50 heredado de run.py daba 0,1 alertas/dia: una cada diez dias. La puerta
+# p10 hace el trabajo fino -- al 0.60 elimina los 4 ciclos y deja 100% de utiles --
+# asi que el ratio puede aflojarse sin ensuciar. 0.70 es donde el volumen se
+# vuelve util (1,1/dia) sin que la precision caiga: 85%.
+#
+# En 0.75 la precision cae a 69%, asi que ahi esta el limite.
+ALERT_MAX_RATIO_RAPIDA = 0.70
+PUERTA_RAREZA = "p10"
