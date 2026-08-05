@@ -196,9 +196,29 @@ def revisar_lote(lote, concurrencia=CONCURRENCIA):
 
 
 def estadisticas(resultados):
-    """Resumen del lote, para el panel de la corrida."""
+    """Resumen del lote, para el panel de la corrida.
+
+    El desglose de errores POR TIPO y POR TIENDA no es adorno. Medido en
+    produccion el 05-08-2026: hardware daba 24 errores de 43 consultas mientras
+    en local daba 0. Con solo el conteo total no habia forma de saber si era
+    timeout, bloqueo o maqueta cambiada, y son tres problemas distintos con tres
+    soluciones distintas.
+    """
+    from collections import Counter
+
+    tipos = Counter()
+    tiendas = Counter()
+    for r in resultados:
+        e = r.get("error")
+        if not e:
+            continue
+        tipos[e] += 1
+        tiendas[r.get("tienda", "?")] += 1
+
     total = len(resultados)
     return {
+        "por_error": dict(tipos.most_common(8)),
+        "por_tienda_error": dict(tiendas.most_common(8)),
         "consultadas": total,
         "sin_cambio": sum(1 for r in resultados if r["estado"] is SIN_CAMBIO),
         "con_cambio": sum(1 for r in resultados if r.get("cambio")),

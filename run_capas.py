@@ -495,6 +495,9 @@ def run_once():
                     f"  OJO: {stats['metodo_cambiado']} tiendas cambiaron de metodo "
                     f"-- revisar extractores.TIENDAS"
                 )
+            if stats.get("por_error"):
+                print(f"  errores por tipo:   {stats['por_error']}")
+                print(f"  errores por tienda: {stats['por_tienda_error']}")
         except Exception as exc:
             print(f"  error en capa rapida: {exc}")
             traceback.print_exc()
