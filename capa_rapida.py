@@ -36,10 +36,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
-from extractores import extraer, metodo_de, nombre_de
+from extractores import extraer_detalle, metodo_de, nombre_de
+from http_tienda import descargar
 
-# UA de navegador real. Las 9 tiendas grandes medidas devuelven 200 con esto y sin
-# proxy: ninguna bloquea. No hace falta ninguna API de scraping para acceder.
+# UA usado en la medicion original. Hay bloqueos 403 en produccion (septiembre
+# 2026); se registran y se aplica espera, sin intentar evadirlos.
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -86,25 +87,18 @@ def consultar(url, cache=None, sesion=None, timeout=TIMEOUT):
     if cache.get("last_modified"):
         cabeceras["If-Modified-Since"] = cache["last_modified"]
 
-    pedir = (sesion or requests).get
     try:
-        resp = pedir(url, headers=cabeceras, timeout=timeout)
+        return descargar(url, cabeceras, timeout, sesion)
     except requests.RequestException as exc:
         return ERROR, None, {"error": type(exc).__name__}
+    except ValueError as exc:
+        # Solo codigos internos, nunca URLs ni credenciales de las excepciones.
+        return ERROR, None, {"error": str(exc) if str(exc) in {
+            "url_no_permitida", "redireccion_otro_host", "destino_no_publico",
+            "destino_invalido", "redireccion_invalida", "redireccion_insegura",
+            "contenido_no_html", "respuesta_demasiado_grande", "tiempo_total_excedido",
+        } else "respuesta_invalida"}
 
-    nuevas = {
-        "etag": resp.headers.get("ETag"),
-        "last_modified": resp.headers.get("Last-Modified"),
-        "status": resp.status_code,
-    }
-
-    if resp.status_code == 304:
-        return SIN_CAMBIO, None, nuevas
-    if resp.status_code != 200:
-        nuevas["error"] = f"HTTP {resp.status_code}"
-        return ERROR, None, nuevas
-
-    return NUEVO, resp.text, nuevas
 
 
 def revisar_una(item, sesion=None):
@@ -133,34 +127,31 @@ def revisar_una(item, sesion=None):
         "cambio": False,
         "precio": None,
         "metodo": None,
+        "reintentar_en": cabeceras.get("retry_after", 0),
     }
 
-    if estado is SIN_CAMBIO:
+    if estado == SIN_CAMBIO:
         # La tienda confirmo que no hay novedad. Ni descarga ni parseo.
         base["precio"] = referencia
         base["huella"] = item.get("huella")
+        base["disponible"] = item.get("disponible")
+        base["moneda"] = item.get("moneda")
         return base
 
-    if estado is ERROR:
+    if estado == ERROR:
         base["error"] = cabeceras.get("error")
         return base
 
-    precio, metodo, cambio_metodo = extraer(
-        html, metodo_esperado=metodo_de(store_id), referencia=referencia
-    )
-
+    lectura = extraer_detalle(html, url=cabeceras.get("url_final") or item["url"])
+    precio, metodo = lectura["precio"], lectura["metodo"]
+    cambio_metodo = bool(metodo and metodo_de(store_id) and metodo != metodo_de(store_id))
+    base.update(disponible=lectura["disponible"], moneda=lectura["moneda"])
     if precio is None:
-        # Habia HTML pero no se pudo leer un precio. Casi siempre significa que la
-        # tienda cambio la maqueta. Se reporta explicito en vez de tratarlo como
-        # "sin cambio", que lo dejaria en silencio.
-        base["error"] = "sin_precio"
+        base["error"] = lectura["error"] or "sin_precio"
+        base["estado"] = ERROR
         base["cambio_metodo"] = cambio_metodo
         return base
-
-    # `is_available` no viene en el HTML de forma uniforme entre tiendas. Que haya
-    # precio legible se toma como disponible, y la capa lenta corrige con el
-    # `is_available` real de Solotodo en su proxima pasada.
-    nueva = huella(precio, True)
+    nueva = huella(precio, lectura["disponible"])
 
     base.update(
         precio=precio,
@@ -181,7 +172,12 @@ def revisar_lote(lote, concurrencia=CONCURRENCIA):
     if not lote:
         return []
 
-    locales = __import__("threading").local()
+    import threading
+    from urllib.parse import urlsplit
+    locales = threading.local()
+    sesiones = []
+    # Una consulta simultanea por dominio, incluso si tiene varios store_id.
+    locks = {urlsplit(i["url"]).netloc: threading.Lock() for i in lote}
 
     def con_sesion(item):
         sesion = getattr(locales, "s", None)
@@ -189,10 +185,16 @@ def revisar_lote(lote, concurrencia=CONCURRENCIA):
             sesion = requests.Session()
             sesion.headers.update(CABECERAS)
             locales.s = sesion
-        return revisar_una(item, sesion=sesion)
+            sesiones.append(sesion)
+        with locks[urlsplit(item["url"]).netloc]:
+            return revisar_una(item, sesion=sesion)
 
-    with ThreadPoolExecutor(max_workers=concurrencia) as pool:
-        return list(pool.map(con_sesion, lote))
+    try:
+        with ThreadPoolExecutor(max_workers=concurrencia) as pool:
+            return list(pool.map(con_sesion, lote))
+    finally:
+        for sesion in sesiones:
+            sesion.close()
 
 
 def estadisticas(resultados):
@@ -220,11 +222,11 @@ def estadisticas(resultados):
         "por_error": dict(tipos.most_common(8)),
         "por_tienda_error": dict(tiendas.most_common(8)),
         "consultadas": total,
-        "sin_cambio": sum(1 for r in resultados if r["estado"] is SIN_CAMBIO),
+        "sin_cambio": sum(1 for r in resultados if r["estado"] == SIN_CAMBIO),
         "con_cambio": sum(1 for r in resultados if r.get("cambio")),
-        "errores": sum(1 for r in resultados if r["estado"] is ERROR or r.get("error")),
+        "errores": sum(1 for r in resultados if r["estado"] == ERROR or r.get("error")),
         "metodo_cambiado": sum(1 for r in resultados if r.get("cambio_metodo")),
         "ahorro_parseo": sum(
-            1 for r in resultados if r["estado"] is SIN_CAMBIO or not r.get("cambio")
+            1 for r in resultados if r["estado"] == SIN_CAMBIO or not r.get("cambio")
         ),
     }
