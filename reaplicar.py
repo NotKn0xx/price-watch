@@ -26,6 +26,29 @@ from pathlib import Path
 SUFIJO = ".json"
 
 
+def guardar_alerta(perfil, product_id, price, reason, store_id, url, sent_at):
+    """Diario de envios confirmados para recuperar tambien el cooldown."""
+    path = Path(f".alertas-{perfil}.json")
+    rows = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    rows.append([product_id, price, reason, store_id, url, sent_at])
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def reaplicar_alertas(conn, ruta):
+    path = Path(ruta)
+    if not path.exists():
+        return
+    for row in json.loads(path.read_text(encoding="utf-8")):
+        conn.execute(
+            "INSERT INTO alerts (product_id, price, reason, store_id, url, sent_at) "
+            "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM alerts WHERE "
+            "product_id IS ? AND price IS ? AND store_id IS ? AND url IS ? AND sent_at IS ?)",
+            (*row, row[0], row[1], row[3], row[4], row[5]),
+        )
+
+
 def ruta_para(perfil):
     """Sidecar por perfil. Va en .gitignore: es estado de una corrida, no del
     repositorio."""
@@ -71,6 +94,9 @@ def reaplicar(ruta):
 
     init_db()
     with get_conn() as conn:
+        perfil = datos.get("perfil")
+        if perfil in ("perfumes", "hardware", "celulares"):
+            reaplicar_alertas(conn, Path(ruta).parent / f".alertas-{perfil}.json")
         cambios_catalogo = 0
         if catalogo:
             segs = load_segments(conn, [o[0] for o in catalogo])
