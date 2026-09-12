@@ -7,6 +7,7 @@ en vez de scrapear cada tienda directamente.
 """
 
 import requests
+import threading
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -18,12 +19,11 @@ MAX_PAGE_SIZE = 100
 
 # Una sola sesion para todo el proceso: reusa la conexion TCP/TLS. Sin esto
 # cada request rehace el handshake (~0.4s vs ~0.15s medido contra la API).
-_session = None
+_local = threading.local()
 
 
 def get_session():
-    global _session
-    if _session is None:
+    if not getattr(_local, "session", None):
         s = requests.Session()
         retry = Retry(
             total=4,
@@ -35,8 +35,8 @@ def get_session():
         adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=8)
         s.mount("https://", adapter)
         s.headers["User-Agent"] = "price-watch/1.0 (+github.com/NotKn0xx/price-watch)"
-        _session = s
-    return _session
+        _local.session = s
+    return _local.session
 
 
 def browse_category(

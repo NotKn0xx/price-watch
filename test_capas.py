@@ -53,21 +53,21 @@ class TestExtraccion(unittest.TestCase):
         self.assertEqual(precio, 123990)
         self.assertEqual(metodo, extractores.LD_JSON)
 
-    def test_ld_json_malformado_cae_a_lectura_plana(self):
-        # ld+json roto es comun; no debe costar la lectura.
+    def test_ld_json_malformado_se_rechaza(self):
+        # Sin estructura valida no podemos asociar el precio al producto.
         html = '<script type="application/ld+json">{"price": "45990",,}</script>'
         precio, _, _ = extractores.extraer(html)
-        self.assertEqual(precio, 45990)
+        self.assertIsNone(precio)
 
-    def test_referencia_elige_el_candidato_correcto(self):
+    def test_referencia_no_resuelve_una_oferta_ambigua(self):
         # Una ficha con accesorios: sin referencia se toma el primero y es el
         # producto equivocado. Es el mismo error de emparejar por cercania.
         html = """<script type="application/ld+json">
         {"@graph":[{"price":"9990"},{"price":"249990"}]}</script>"""
         sin_ref, _, _ = extractores.extraer(html)
         con_ref, _, _ = extractores.extraer(html, referencia=250000)
-        self.assertEqual(sin_ref, 9990)
-        self.assertEqual(con_ref, 249990)
+        self.assertIsNone(sin_ref)
+        self.assertIsNone(con_ref)
 
     def test_avisa_cuando_cambia_el_metodo(self):
         html = '<meta itemprop="price" content="75990">'
@@ -257,59 +257,35 @@ class TestVigilancia(unittest.TestCase):
 
 class TestCapaRapida(unittest.TestCase):
     def test_huella_ignora_el_cuerpo(self):
-        # Medido: dos peticiones identicas devuelven cuerpos distintos (tokens de
-        # sesion). La unica huella estable es la del dato ya extraido.
         self.assertEqual(capa_rapida.huella(1000, True), capa_rapida.huella(1000, True))
         self.assertNotEqual(capa_rapida.huella(1000, True), capa_rapida.huella(999, True))
         self.assertNotEqual(capa_rapida.huella(1000, True), capa_rapida.huella(1000, False))
 
     def test_304_no_parsea_y_conserva_el_precio(self):
-        class Resp:
-            status_code = 304
-            headers = {"Last-Modified": "Mon, 04 Aug 2026 10:00:00 GMT"}
-
-        class Sesion:
-            def get(self, *a, **k):
-                return Resp()
-
-        item = {"entity_id": 1, "store_id": 9, "url": "http://x", "precio": 50000,
-                "huella": capa_rapida.huella(50000, True),
-                "cache": {"last_modified": "Mon, 04 Aug 2026 09:00:00 GMT"}}
-        r = capa_rapida.revisar_una(item, sesion=Sesion())
+        from unittest.mock import patch
+        item = {"entity_id": 1, "store_id": 9, "url": "https://tienda.cl/p", "precio": 50000,
+                "huella": capa_rapida.huella(50000, True), "disponible": True, "moneda": "CLP"}
+        with patch("capa_rapida.consultar", return_value=("sin_cambio", None, {})):
+            r = capa_rapida.revisar_una(item)
         self.assertEqual(r["estado"], capa_rapida.SIN_CAMBIO)
         self.assertFalse(r["cambio"])
         self.assertEqual(r["precio"], 50000)
+        self.assertTrue(r["disponible"])
 
     def test_precio_igual_no_marca_cambio(self):
-        class Resp:
-            status_code = 200
-            headers = {}
-            text = '<script type="application/ld+json">{"price":"50000"}</script>'
-
-        class Sesion:
-            def get(self, *a, **k):
-                return Resp()
-
-        item = {"entity_id": 1, "store_id": 9, "url": "http://x", "precio": 50000,
+        from unittest.mock import patch
+        html = '<script type="application/ld+json">{"price":50000,"priceCurrency":"CLP","availability":"https://schema.org/InStock"}</script>'
+        item = {"entity_id": 1, "store_id": 9, "url": "https://tienda.cl/p", "precio": 50000,
                 "huella": capa_rapida.huella(50000, True)}
-        r = capa_rapida.revisar_una(item, sesion=Sesion())
+        with patch("capa_rapida.consultar", return_value=("nuevo", html, {})):
+            r = capa_rapida.revisar_una(item)
         self.assertEqual(r["precio"], 50000)
-        self.assertFalse(r["cambio"], "sin cambio real no debe gatillar trabajo aguas abajo")
+        self.assertFalse(r["cambio"])
 
     def test_maqueta_rota_se_reporta_no_se_silencia(self):
-        class Resp:
-            status_code = 200
-            headers = {}
-            text = "<html>sin precio</html>"
-
-        class Sesion:
-            def get(self, *a, **k):
-                return Resp()
-
-        r = capa_rapida.revisar_una(
-            {"entity_id": 1, "store_id": 9, "url": "http://x", "precio": 50000},
-            sesion=Sesion(),
-        )
+        from unittest.mock import patch
+        with patch("capa_rapida.consultar", return_value=("nuevo", "<html>sin precio</html>", {})):
+            r = capa_rapida.revisar_una({"entity_id": 1, "store_id": 9, "url": "https://tienda.cl/p"})
         self.assertEqual(r["error"], "sin_precio")
         self.assertFalse(r["cambio"])
 
@@ -339,7 +315,7 @@ class TestEstadoRapido(unittest.TestCase):
     def test_ida_y_vuelta(self):
         import estado_rapido
 
-        wl = [{"entity_id": 12, "nivel": "alta", "precio": 5000}]
+        wl = [{"entity_id": 12, "store_id": 9, "url": "https://tienda.cl/p", "nivel": "alta", "precio": 5000}]
         ts = estado_rapido.sello()
         estado_rapido.guardar("p", 7, {12: {"etag": "a", "huella": "h"}}, wl, ts)
         e = estado_rapido.cargar("p")
@@ -417,7 +393,7 @@ class TestEstadoRapido(unittest.TestCase):
         """
         import estado_rapido
 
-        wl = [{"entity_id": i, "nivel": "alta"} for i in range(5)]
+        wl = [{"entity_id": i, "store_id": 9, "url": "https://tienda.cl/p", "precio": 5000, "nivel": "alta"} for i in range(5)]
         estado_rapido.guardar("p", 3, {}, wl, estado_rapido.sello())
 
         # Simula el reset: el .db desaparece por completo.
