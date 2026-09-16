@@ -18,7 +18,11 @@ def _get_session():
             total=3,
             backoff_factor=2,  # 0s, 2s, 4s
             status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=("POST",),
+            # sendMessage no es idempotente: un timeout puede ocurrir despues
+            # de que Telegram acepte el mensaje. No repetir POST automaticamente.
+            allowed_methods=("GET",),
+            read=0,
+            status=0,
             raise_on_status=False,
         )
         s.mount("https://", HTTPAdapter(max_retries=retry))
@@ -48,11 +52,15 @@ def send_alert(text: str) -> bool:
             timeout=15,
         )
     except requests.RequestException as exc:
-        print(f"  [Telegram] fallo de red: {exc}")
+        # Las excepciones de requests contienen la URL y, con ella, el token.
+        print(f"  [Telegram] fallo de red: {type(exc).__name__}")
         return False
 
     if not resp.ok:
         # El cuerpo trae el motivo real (chat_id malo, bot bloqueado, etc.).
-        print(f"  [Telegram] HTTP {resp.status_code}: {resp.text[:200]}")
+        print(f"  [Telegram] HTTP {resp.status_code}")
         return False
-    return True
+    try:
+        return resp.json().get("ok") is True
+    except (ValueError, AttributeError):
+        return False

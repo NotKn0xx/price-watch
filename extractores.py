@@ -22,9 +22,6 @@ anterior sobre listados concluyo lo contrario. La ficha y el listado se comporta
 distinto; aca solo se usan fichas.
 """
 
-import json
-import re
-
 LD_JSON = "ld+json"
 META = "meta"
 TEXTO = "texto"
@@ -93,132 +90,32 @@ RENDERIZAN_EN_CLIENTE = {
 # precio en el intermedio.
 TOLERANCIA_VALIDACION = 0.02
 
-_RE_LD = re.compile(
-    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-    re.S | re.I,
-)
-_RE_LD_PRECIO = re.compile(r'"(?:price|lowPrice)"\s*:\s*"?([\d.,]+)', re.I)
-_RE_META = re.compile(
-    r'(?:itemprop=["\']price["\'][^>]*content=|'
-    r'property=["\']product:price:amount["\'][^>]*content=)["\']([\d.,]+)["\']',
-    re.I,
-)
-_RE_TEXTO = re.compile(r"\$\s?(\d{1,3}(?:[.,]\d{3})+)")
-
-# Claves donde Schema.org deja el precio, en orden de especificidad.
-_CLAVES_PRECIO = ("price", "lowPrice")
-
-
-def _a_entero(bruto):
-    """Normaliza un precio de texto a CLP entero, o None.
-
-    En CLP no hay decimales, pero las tiendas mezclan formatos: "1.629.900",
-    "1629900.00", "1,629,900". La regla que funciona en los 30 casos medidos: si
-    el ultimo separador deja exactamente 2 digitos a la derecha son centavos y se
-    descartan; en cualquier otro caso el separador es de miles.
-    """
-    if bruto is None:
-        return None
-    texto = str(bruto).strip()
-    if not texto:
-        return None
-
-    m = re.search(r"[.,](\d+)$", texto)
-    if m and len(m.group(1)) == 2:
-        texto = texto[: m.start()]
-
-    digitos = re.sub(r"[^\d]", "", texto)
-    if not digitos:
-        return None
-    try:
-        valor = int(digitos)
-    except ValueError:
-        return None
-    return valor if valor > 0 else None
-
-
-def _caminar_ld(nodo):
-    """Recorre un ld+json ya parseado y va entregando los precios que encuentre.
-
-    El precio puede venir en el nodo raiz, en `offers`, en una lista de `offers`,
-    o dentro de un `@graph`. Recorrer en vez de asumir una forma evita tener un
-    extractor por tienda.
-    """
-    if isinstance(nodo, dict):
-        for clave in _CLAVES_PRECIO:
-            if clave in nodo:
-                valor = _a_entero(nodo[clave])
-                if valor:
-                    yield valor
-        for hijo in nodo.values():
-            if isinstance(hijo, (dict, list)):
-                yield from _caminar_ld(hijo)
-    elif isinstance(nodo, list):
-        for hijo in nodo:
-            yield from _caminar_ld(hijo)
+# La referencia historica sirve para detectar caidas, no para elegir que
+# producto representa un numero. Solo aceptamos una oferta inequivoca.
+from lectura_producto import leer as extraer_detalle, precio_clp as _a_entero
 
 
 def precios_ld_json(html):
-    """Todos los precios declarados en bloques application/ld+json."""
-    encontrados = []
-    for bloque in _RE_LD.findall(html):
-        crudo = bloque.strip()
-        try:
-            encontrados.extend(_caminar_ld(json.loads(crudo)))
-        except (ValueError, TypeError):
-            # ld+json malformado es comun (comas colgando, HTML sin escapar).
-            # Antes de descartar el bloque, se intenta la lectura plana.
-            encontrados.extend(
-                v for v in (_a_entero(p) for p in _RE_LD_PRECIO.findall(crudo)) if v
-            )
-    return encontrados
+    lectura = extraer_detalle(html)
+    return [lectura["precio"]] if lectura["metodo"] == LD_JSON else []
 
 
 def precios_meta(html):
-    """Precios en <meta itemprop="price"> / product:price:amount."""
-    return [v for v in (_a_entero(p) for p in _RE_META.findall(html)) if v]
+    lectura = extraer_detalle(html)
+    return [lectura["precio"]] if lectura["metodo"] == META else []
 
 
 def precios_texto(html):
-    """Precios escritos como $ 123.456 en la maqueta. Ultimo recurso."""
-    return [v for v in (_a_entero(p) for p in _RE_TEXTO.findall(html)) if v]
-
-_LECTORES = {
-    LD_JSON: precios_ld_json,
-    META: precios_meta,
-    TEXTO: precios_texto,
-}
+    # Un numero en la maqueta puede ser una cuota, envio o un accesorio.
+    return []
 
 
-def extraer(html, metodo_esperado=None, referencia=None):
-    """Saca el precio del HTML. Devuelve (precio, metodo, cambio_de_metodo).
-
-    `referencia` es el ultimo precio conocido de esa entidad. Cuando se pasa, se
-    elige el candidato mas cercano a la referencia en vez del primero que aparezca;
-    sin eso, una ficha que ademas muestra accesorios o "productos relacionados"
-    puede entregar el precio de otra cosa. Es el mismo error de emparejar por
-    cercania que ya nos costo caro: aca la referencia acota, no adivina.
-
-    `cambio_de_metodo` en True significa que el metodo registrado dejo de servir y
-    respondio otro. No es un error -- el precio sirve igual -- pero es la senal de
-    que la tienda cambio y que el registro quedo viejo.
-    """
-    orden = []
-    if metodo_esperado in _LECTORES:
-        orden.append(metodo_esperado)
-    orden += [m for m in METODOS if m != metodo_esperado]
-
-    for metodo in orden:
-        candidatos = _LECTORES[metodo](html)
-        if not candidatos:
-            continue
-        if referencia:
-            precio = min(candidatos, key=lambda p: abs(p - referencia))
-        else:
-            precio = candidatos[0]
-        return precio, metodo, (metodo != metodo_esperado and metodo_esperado is not None)
-
-    return None, None, False
+def extraer(html, metodo_esperado=None, referencia=None, url=None):
+    """API compatible. `referencia` ya no interviene en la seleccion."""
+    lectura = extraer_detalle(html, url=url)
+    metodo = lectura["metodo"]
+    cambio = bool(metodo and metodo_esperado and metodo != metodo_esperado)
+    return lectura["precio"], metodo, cambio
 
 
 COINCIDE = "coincide"

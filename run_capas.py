@@ -244,7 +244,7 @@ def _evaluar(fila, precio):
     1,1 con 85% de utiles.
     """
     base = fila.get("baseline")
-    if not base or not precio:
+    if not base or not precio or precio < _cfg("MIN_PRICE_CLP", vigilancia.MIN_PRECIO_CLP):
         return None
 
     max_ratio = _cfg("ALERT_MAX_RATIO_RAPIDA", _cfg("ALERT_MAX_RATIO", 0.50))
@@ -316,12 +316,8 @@ def _mensaje(fila, precio, hallazgo, clase, cayeron, comparadas):
     elif hallazgo["bajo_p10"]:
         lineas.append("Por debajo de su p10 historico")
 
-    if clase == "aislada":
-        lineas.append(f"Solo esta tienda bajo ({comparadas} comparadas) - posible error")
-    elif clase == "campana":
-        lineas.append(f"Bajaron {cayeron}/{comparadas} tiendas - es campana, no error")
-    elif clase == "parcial":
-        lineas.append(f"Bajaron {cayeron}/{comparadas} tiendas")
+    if comparadas:
+        lineas.append("La comparacion con otras tiendas es historica; no confirma una campana actual.")
 
     lineas += ["", f"Comprar: {fila['url']}"]
     return "\n".join(lineas)
@@ -337,32 +333,51 @@ def correr_rapida(conn, disparo, cache, watchlist):
         por_producto.setdefault(f.get("product_id"), []).append(f)
 
     lote = vigilancia.lote_del_disparo(watchlist, disparo)
+    elegibles = len(lote)
+    lote = [item for item in lote if not (
+        (cache.get(item["entity_id"]) or {}).get("url") == item["url"] and
+        (cache.get(item["entity_id"]) or {}).get("reintentar_despues", 0) > time.time())]
     for item in lote:
         guardado = cache.get(item["entity_id"]) or {}
+        if guardado.get("url") != item["url"]:
+            guardado = {}
         item["cache"] = {
             "etag": guardado.get("etag"),
             "last_modified": guardado.get("last_modified"),
         }
         item["huella"] = guardado.get("huella")
+        if guardado.get("precio") is not None:
+            item["precio"] = guardado["precio"]
+        item["disponible"] = guardado.get("disponible")
+        item["moneda"] = guardado.get("moneda")
+        if not guardado.get("huella"):
+            item["cache"] = {}
 
     resultados = capa_rapida.revisar_lote(lote)
     stats = capa_rapida.estadisticas(resultados)
+    stats["en_espera"] = elegibles - len(lote)
 
     por_id = {f["entity_id"]: f for f in watchlist}
     candidatos = []
 
     for r in resultados:
         guardado = cache.setdefault(r["entity_id"], {})
-        guardado.update(
-            {k: v for k, v in (r.get("cache") or {}).items() if v},
-        )
-        if r.get("huella"):
-            guardado["huella"] = r["huella"]
-
         if r.get("error"):
+            # No guardar ETag de HTML que no supimos leer: el siguiente 304
+            # congelaria el fallo indefinidamente.
+            intentos = min(guardado.get("fallos", 0) + 1, 6)
+            guardado.clear()
+            espera = max(min(600 * 2 ** (intentos - 1), 21600), r.get("reintentar_en", 0))
+            guardado.update(url=r["url"], fallos=intentos,
+                            reintentar_despues=time.time() + espera)
             continue
-        if not r.get("cambio") or not r.get("precio"):
-            continue  # nada nuevo: no se evalua ni se escribe
+        if r["estado"] == capa_rapida.NUEVO:
+            guardado.clear()
+        guardado.update({k: v for k, v in (r.get("cache") or {}).items() if v})
+        guardado.update(url=r["url"], huella=r.get("huella"), precio=r.get("precio"),
+                        disponible=r.get("disponible"), moneda=r.get("moneda"))
+        if not r.get("precio"):
+            continue
 
         fila = por_id.get(r["entity_id"])
         if not fila:
@@ -371,7 +386,12 @@ def correr_rapida(conn, disparo, cache, watchlist):
         # El ultimo precio visto queda en la watchlist en memoria; se persiste
         # con el sidecar al final de la corrida.
         fila["precio"] = r["precio"]
-
+        # Precio legible no demuestra stock ni moneda. Solo oferta confirmada.
+        if r.get("disponible") is not True or r.get("moneda") != "CLP":
+            stats["sin_confirmacion"] = stats.get("sin_confirmacion", 0) + 1
+            continue
+        # Reevaluar tambien 304/precio igual. El envio pudo fallar o no tener
+        # cupo; la tabla alerts, no la huella del HTML, controla duplicados.
         hallazgo = _evaluar(fila, r["precio"])
         if hallazgo:
             candidatos.append((fila, r["precio"], hallazgo))
@@ -428,16 +448,18 @@ def _alertar(conn, candidatos, por_producto):
         if DRY_RUN:
             print("  [DRY RUN]", mensaje.replace("\n", " | "))
             enviadas += 1
+            recientes[fila.get("product_id")] = precio
             continue
 
         if send_alert(mensaje):
             record_alert(
                 conn, fila.get("product_id"), precio,
                 f"capa rapida: -{hallazgo['caida']}% ({clase})",
-                fila["store_id"], fila["url"],
+                fila["store_id"], fila["url"], journal_profile=PROFILE,
             )
             conn.commit()
             enviadas += 1
+            recientes[fila.get("product_id")] = precio
             print("  ALERTA:", (fila.get("nombre") or "")[:60])
         else:
             motivos["envio"] += 1
@@ -457,6 +479,9 @@ def run_once():
     cache = estado["cache"]
     watchlist = estado["watchlist"]
     watchlist_ts = estado["watchlist_ts"]
+    ultimo_intento = estado.get("ultimo_intento_lenta")
+    rotacion = estado.get("rotacion", 0)
+    errores = []
 
     lenta = {"corrio": False}
     stats = {"consultadas": 0}
@@ -467,13 +492,19 @@ def run_once():
     )
     if MODO == "rapida":
         toca_lenta = False
+    if toca_lenta and MODO != "lenta" and ultimo_intento and not estado_rapido.vencida([{}], ultimo_intento, 1):
+        toca_lenta = False
 
     if toca_lenta:
+        ultimo_intento = estado_rapido.sello()
         print(f"Capa lenta ({PROFILE})...")
         try:
-            nueva, conteo, peticiones, diag = refrescar_watchlist(disparo)
+            nueva, conteo, peticiones, diag = refrescar_watchlist(rotacion)
+            rotacion += 1  # independiente del numero de disparos de la capa rapida
             if nueva:
                 watchlist, watchlist_ts = nueva, estado_rapido.sello()
+            else:
+                errores.append("La capa lenta no produjo entidades; reintento en una hora")
             lenta = {"corrio": True, "entidades": len(nueva), "conteo": conteo,
                      "peticiones": peticiones, **diag}
         except Exception as exc:
@@ -481,6 +512,12 @@ def run_once():
             # mejor que ninguna, y `vencida()` hara que se reintente igual.
             print(f"  error en capa lenta: {exc}")
             traceback.print_exc()
+            errores.append("Fallo de capa lenta")
+
+    # Una referencia sin refrescar varios dias ya no demuestra una rebaja actual.
+    if watchlist and estado_rapido.vencida(watchlist, watchlist_ts, 48):
+        errores.append("Referencia historica vencida hace mas de 48 horas")
+        watchlist = []
 
     with get_conn() as conn:
         print(f"Capa rapida (disparo {disparo})...")
@@ -501,13 +538,18 @@ def run_once():
         except Exception as exc:
             print(f"  error en capa rapida: {exc}")
             traceback.print_exc()
+            errores.append("Fallo de capa rapida")
+        if stats.get("consultadas") and stats.get("errores") == stats["consultadas"]:
+            errores.append("Todas las consultas de la capa rapida fallaron")
 
     cache = estado_rapido.podar(cache, [f["entity_id"] for f in watchlist])
-    estado_rapido.guardar(PROFILE, disparo, cache, watchlist, watchlist_ts)
+    estado_rapido.guardar(PROFILE, disparo, cache, watchlist, watchlist_ts, ultimo_intento, rotacion)
 
     duracion = time.time() - inicio
     print(f"Listo en {duracion:.1f}s | {enviadas} alertas")
     _resumen(lenta, stats, enviadas, disparo, duracion)
+    if errores:
+        raise RuntimeError("; ".join(errores))
     return enviadas
 
 
@@ -532,9 +574,7 @@ def _resumen(lenta, stats, enviadas, disparo, duracion):
         ]
         if not lenta["entidades"]:
             lineas += [
-                "> **Watchlist vacia.** La capa lenta se reintentara en cada "
-                "disparo hasta que esto se arregle, gastando 400 pricing_history "
-                "por corrida contra una API gratuita ajena.",
+                "> **Watchlist vacia.** La capa lenta se reintentara en una hora. Revisar errores de red, catalogo y extraccion.",
                 "",
             ]
         # La capa lenta deberia correr 2 veces al dia, no en cada disparo. Si
@@ -562,6 +602,8 @@ def _resumen(lenta, stats, enviadas, disparo, duracion):
         f"| {sup.get('cooldown',0)} | {sup.get('envio',0)} |",
         "",
         f"Terminado en {duracion:.1f}s.",
+        f"Sin confirmacion de stock/moneda: {stats.get('sin_confirmacion', 0)}. "
+        f"En espera tras fallos: {stats.get('en_espera', 0)}.",
     ]
     # El presupuesto se comparte con run.py. Hoy no topa (pico medido: 3/dia de
     # 20), pero si empieza a topar hay que verlo aca antes que en Telegram.
