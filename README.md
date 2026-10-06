@@ -1,5 +1,11 @@
 # price-watch
 
+> Revision del 05-09-2026: [auditoria de arquitectura, precios y seguridad](docs/AUDITORIA-2026-09-05.md).
+> Las mediciones historicas de este README no garantizan precision ni cobertura
+> actuales. La capa rapida ahora exige una oferta inequivoca, CLP y stock
+> confirmado; deja sin alerta los casos ambiguos. Las cifras del backtest miden
+> rareza historica, no compras verificadas.
+
 Bot que vigila el catalogo de tiendas chilenas via la API publica de
 [Solotodo](https://publicapi.solotodo.com) y avisa por Telegram cuando un
 producto aparece a un precio anomalamente bajo respecto de su propia historia.
@@ -64,7 +70,9 @@ Y el subsistema de dos capas, que corre en paralelo a `run.py`:
 |---|---|
 | `capa_lenta.py` | `/entities/` + `/pricing_history/`: baseline, percentil, volatilidad |
 | `capa_rapida.py` | Consulta la tienda directo, con peticion condicional |
-| `extractores.py` | Lee el precio del HTML. 30 tiendas validadas |
+| `extractores.py` / `lectura_producto.py` | Oferta estructurada, moneda, identidad y stock; registro historico de tiendas |
+| `http_tienda.py` | Destinos publicos, redirecciones y descargas limitadas |
+| `auditar_fichas.py` | Diagnostico de una muestra real sin Telegram ni cambios en SQLite |
 | `vigilancia.py` | Que vigilar y cada cuanto |
 | `estado_rapido.py` | Sidecar efimero: cabeceras, huellas, contador |
 | `run_capas.py` | Orquestacion de ambas capas |
@@ -148,7 +156,9 @@ ventana lo hace el detector.
 
 ## Cadencia y presupuesto
 
-El repo es privado, y Actions cobra **cada job redondeado al minuto**, con
+El siguiente presupuesto se calculo cuando el repo era privado. El repositorio
+consultado el 05-09-2026 es publico; no usar estas cifras como costo vigente.
+En la estimacion original se consideraban jobs redondeados al minuto, con
 2.000 minutos/mes en el plan Free. Los tres perfiles corren como tres pasos de
 un mismo job (18s de trabajo real) en vez de tres workflows separados.
 

@@ -55,7 +55,8 @@ def _parse(ts):
     if isinstance(ts, datetime):
         return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
     try:
-        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
 
@@ -294,10 +295,10 @@ def normal_sostenido(filas, tolerancia=0.02):
         return None, None, 0.0
 
     segundos = 0.0
-    for i, fila in enumerate(disponibles):
-        if abs(fila["precio"] - declarado) / declarado > tolerancia:
+    for i, fila in enumerate(filas):
+        if not fila["disponible"] or abs(fila["precio"] - declarado) / declarado > tolerancia:
             continue
-        fin = disponibles[i + 1]["ts"] if i + 1 < len(disponibles) else _ahora()
+        fin = filas[i + 1]["ts"] if i + 1 < len(filas) else _ahora()
         segundos += max((fin - fila["ts"]).total_seconds(), PESO_MINIMO_SEGUNDOS)
 
     dias = segundos / 86400
@@ -324,7 +325,8 @@ def corroborar(resumenes_por_tienda, store_id):
 
     # "Cayo" = esta por debajo del percentil 25 de su propia historia. Se usa el
     # percentil y no un % fijo para no volver a comparar productos distintos entre si.
-    cayeron = sum(1 for _, r in otros if (r.get("percentil") or 1.0) <= 0.25)
+    cayeron = sum(1 for _, r in otros
+                 if r.get("percentil") is not None and r["percentil"] <= 0.25)
 
     if cayeron == 0:
         return "aislada", 0, len(otros)
