@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+.venv/
+auditoria-local/
 .env
 
 # Worker disparador
@@ -9,6 +11,9 @@ node_modules/
 # Sidecar de observaciones por corrida: estado efimero, no del repo.
 # Permite reaplicar una corrida sobre un .db fresco si el push es rechazado.
 .observaciones-*.json
+.alertas-*.json
+.alertas-*.tmp
+.estado-rapido-*.tmp
 
 # Estado de la capa rapida: cabeceras condicionales, huellas y contador de
 # disparo. Cambia en cada disparo (cada 10 min), asi que en git dejaria un diff

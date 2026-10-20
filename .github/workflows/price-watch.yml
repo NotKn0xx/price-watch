@@ -111,6 +111,7 @@ jobs:
       # continue-on-error para que la caida de un perfil no se lleve a los
       # otros ni impida guardar el historial de los que si corrieron.
       - name: Perfumes
+        id: perfumes
         continue-on-error: true
         run: python run.py
         env:
@@ -120,6 +121,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       - name: Hardware
+        id: hardware
         continue-on-error: true
         run: python run.py
         env:
@@ -129,6 +131,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       - name: Celulares
+        id: celulares
         continue-on-error: true
         run: python run.py
         env:
@@ -152,6 +155,7 @@ jobs:
       # de los ciclos solo corre la rapida (~0,3s cuando las tiendas responden
       # 304, medido).
       - name: Capas perfumes
+        id: capas_perfumes
         continue-on-error: true
         run: python run_capas.py
         env:
@@ -161,6 +165,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       - name: Capas hardware
+        id: capas_hardware
         continue-on-error: true
         run: python run_capas.py
         env:
@@ -170,6 +175,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       - name: Capas celulares
+        id: capas_celulares
         continue-on-error: true
         run: python run_capas.py
         env:
@@ -223,3 +229,19 @@ jobs:
           done
           echo "No se pudo pushear el historial tras 5 intentos" >&2
           exit 1
+
+      # Guardar los perfiles sanos primero y hacer visible cualquier fallo despues.
+      - name: Comprobar resultado de los perfiles
+        if: always()
+        env:
+          RESULTADOS: >-
+            ${{ steps.perfumes.outcome }} ${{ steps.hardware.outcome }}
+            ${{ steps.celulares.outcome }} ${{ steps.capas_perfumes.outcome }}
+            ${{ steps.capas_hardware.outcome }} ${{ steps.capas_celulares.outcome }}
+        run: |
+          for resultado in $RESULTADOS; do
+            if [ "$resultado" = failure ]; then
+              echo "Al menos un perfil fallo. Consultar el resumen y los logs." >&2
+              exit 1
+            fi
+          done

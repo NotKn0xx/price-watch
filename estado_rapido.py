@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # v2: la watchlist se movio del .db a este sidecar. Un archivo v1 se descarta.
-VERSION = 2
+VERSION = 3  # invalida huellas anteriores a la validacion de moneda y stock
 
 
 def ruta_para(perfil):
@@ -49,7 +49,8 @@ def _ahora():
 
 def cargar(perfil):
     """Devuelve el estado completo como dict, o uno vacio si no hay o no sirve."""
-    vacio = {"disparo": 0, "cache": {}, "watchlist": [], "watchlist_ts": None}
+    vacio = {"disparo": 0, "cache": {}, "watchlist": [], "watchlist_ts": None,
+             "ultimo_intento_lenta": None, "rotacion": 0}
     ruta = ruta_para(perfil)
     if not ruta.exists():
         return vacio
@@ -60,22 +61,34 @@ def cargar(perfil):
         # de cero, que es un estado valido.
         return vacio
 
-    if datos.get("version") != VERSION:
+    if not isinstance(datos, dict) or datos.get("version") != VERSION:
+        return vacio
+    try:
+        result = {
+            "disparo": int(datos.get("disparo") or 0),
+            # Las claves de JSON son texto; los entity_id se usan como enteros.
+            "cache": {int(k): v for k, v in (datos.get("cache") or {}).items()},
+            "watchlist": datos.get("watchlist") or [],
+            "watchlist_ts": datos.get("watchlist_ts"),
+            "ultimo_intento_lenta": datos.get("ultimo_intento_lenta"),
+            "rotacion": int(datos.get("rotacion") or 0),
+        }
+        if (result["disparo"] < 0 or not isinstance(result["watchlist"], list)
+                or any(not isinstance(v, dict) for v in result["cache"].values())
+                or any(not isinstance(v, dict) or not all(k in v for k in
+                    ("entity_id", "store_id", "url", "precio")) for v in result["watchlist"])):
+            return vacio
+        return result
+    except (ValueError, TypeError, AttributeError):
         return vacio
 
-    return {
-        "disparo": int(datos.get("disparo") or 0),
-        # Las claves de JSON son texto; los entity_id se usan como enteros.
-        "cache": {int(k): v for k, v in (datos.get("cache") or {}).items()},
-        "watchlist": datos.get("watchlist") or [],
-        "watchlist_ts": datos.get("watchlist_ts"),
-    }
 
-
-def guardar(perfil, disparo, cache, watchlist=None, watchlist_ts=None):
+def guardar(perfil, disparo, cache, watchlist=None, watchlist_ts=None,
+            ultimo_intento_lenta=None, rotacion=0):
     """Vuelca el estado. `cache` puede venir con claves int o str."""
     ruta = ruta_para(perfil)
-    ruta.write_text(
+    temporal = ruta.with_suffix(".tmp")
+    temporal.write_text(
         json.dumps(
             {
                 "version": VERSION,
@@ -83,11 +96,14 @@ def guardar(perfil, disparo, cache, watchlist=None, watchlist_ts=None):
                 "cache": {str(k): v for k, v in cache.items()},
                 "watchlist": watchlist or [],
                 "watchlist_ts": watchlist_ts,
+                "ultimo_intento_lenta": ultimo_intento_lenta,
+                "rotacion": rotacion,
             },
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
+    temporal.replace(ruta)
     return ruta
 
 

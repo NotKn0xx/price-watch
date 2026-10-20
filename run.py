@@ -23,6 +23,7 @@ from detector import check_anomaly, has_mature_history, utcnow
 from notifier import send_alert
 from reaplicar import guardar
 from solotodo import best_entity_for_alert, browse_category
+from lectura_producto import precio_clp
 
 PROFILE = os.environ.get("PROFILE", "perfumes")
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
@@ -170,6 +171,27 @@ def run_once():
                 descartadas += 1
                 continue
 
+            # El minimo agregado de browse puede estar atrasado o venir de otra
+            # ficha. Precio, descuento, enlace y registro deben describir la
+            # misma entidad que acabamos de comprobar.
+            registro = entity.get("active_registry") or {}
+            precio = precio_clp(registro.get("offer_price"))
+            product = {**product, "price": precio,
+                       "old_price": precio_clp(registro.get("normal_price")), "discount": None}
+            finding = check_anomaly(
+                product, load_segments(conn, [product["product_id"]]).get(product["product_id"], []),
+                min_price=_cfg("MIN_PRICE_CLP", 0),
+                alert_max_ratio=_cfg("ALERT_MAX_RATIO", 0.50),
+                window_days=_cfg("HISTORY_WINDOW_DAYS", 30),
+            )
+            if not finding:
+                descartadas += 1
+                continue
+            reciente = load_recent_alerts(conn, [product["product_id"]],
+                within_hours=_cfg("ALERT_COOLDOWN_HOURS", 24)).get(product["product_id"])
+            if reciente is not None and precio > reciente * (1 - _cfg("REALERT_ON_EXTRA_DROP", 0.10)):
+                continue
+
             store_name = profile.STORE_IDS.get(entity["store_id"], "?")
             msg = build_message(product, finding, entity, store_name, category_name)
 
@@ -181,7 +203,7 @@ def run_once():
             if send_alert(msg):
                 record_alert(
                     conn, product["product_id"], product["price"],
-                    finding["reason"], entity["store_id"], entity["external_url"],
+                    finding["reason"], entity["store_id"], entity["external_url"], journal_profile=PROFILE,
                 )
                 conn.commit()  # cada alerta queda registrada apenas sale
                 enviadas += 1
@@ -194,6 +216,8 @@ def run_once():
     duracion = time.time() - started
     print(f"Listo en {duracion:.1f}s | {enviadas} alertas | {descartadas} sin stock")
     _write_summary(all_stats, enviadas, descartadas, errores, duracion)
+    if errores:
+        raise RuntimeError(f"Fallaron {len(errores)} categorias; el historial disponible fue guardado")
     return enviadas
 
 
