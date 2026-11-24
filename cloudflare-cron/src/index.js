@@ -17,6 +17,8 @@ const EVENTO = "escanear";
 async function dispatch(env, cuerpo) {
   return fetch(`https://api.github.com/repos/${REPO}/dispatches`, {
     method: "POST",
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
     headers: {
       Authorization: `Bearer ${env.GITHUB_TOKEN}`,
       Accept: "application/vnd.github+json",
@@ -31,8 +33,7 @@ async function dispatch(env, cuerpo) {
 export default {
   async scheduled(evento, env) {
     if (!env.GITHUB_TOKEN) {
-      console.error("Falta el secreto GITHUB_TOKEN");
-      return;
+      throw new Error("dispatch no iniciado: falta el secreto GITHUB_TOKEN");
     }
 
     const programado = evento.scheduledTime;   // lo que el cron pretendia
@@ -49,19 +50,30 @@ export default {
       },
     };
 
-    // Un reintento: un 5xx puntual de GitHub no deberia costarnos el ciclo.
-    let respuesta = await dispatch(env, cuerpo);
-    if (respuesta.status >= 500) {
-      await new Promise((r) => setTimeout(r, 2000));
+    // Solo reintentar una respuesta explicita 5xx. Si se corta la conexion,
+    // GitHub pudo haber aceptado el POST; esperamos al proximo cron.
+    let respuesta;
+    try {
       respuesta = await dispatch(env, cuerpo);
+      if (respuesta.status >= 500 && respuesta.status <= 599) {
+        await new Promise((r) => setTimeout(r, 2000));
+        respuesta = await dispatch(env, cuerpo);
+      }
+    } catch {
+      throw new Error("dispatch sin confirmacion: conexion, timeout o redireccion de GitHub");
     }
 
-    if (respuesta.status === 204) {
-      console.log(`dispatch ok · desfase ${desfase}s · cron "${evento.cron}"`);
-    } else {
-      // El cuerpo del error de GitHub no lleva secretos, es seguro registrarlo.
-      console.error(`dispatch fallo ${respuesta.status}: ${await respuesta.text()}`);
+    if (respuesta.status !== 204) {
+      let pista = "revisar el estado de la API";
+      if ([401, 403, 404].includes(respuesta.status)) {
+        pista = "revisar acceso, vigencia y permiso Contents: Read and write del token";
+      } else if (respuesta.status === 429) {
+        pista = "limite de API: se esperara el proximo cron";
+      }
+      // No incluir el cuerpo de la respuesta ni credenciales en logs.
+      throw new Error(`dispatch fallo HTTP ${respuesta.status}: ${pista}`);
     }
+    console.log(`dispatch ok · desfase ${desfase}s · cron "${evento.cron}"`);
   },
 
   // Solo estado. No dispara nada: una URL publica que lanzara escaneos seria

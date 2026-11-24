@@ -2,13 +2,12 @@ name = "price-watch-cron"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
 
-# Cada 10 min en la misma ventana que usaba el workflow: 12:00-02:59 UTC, que
-# es 08:00-22:59 CLT en invierno y 09:00-23:59 en verano. Cubre el dia
-# comercial completo sin editar esto cuando Chile cambia de huso.
+# Cada 10 min entre 12:00 y 03:59 UTC (hasta 23:59 en invierno y 00:59
+# en verano). La hora extra cubre aperturas de ofertas a medianoche.
 #
 # Son 2 de los 5 Cron Triggers que permite el plan gratuito.
 [triggers]
-crons = ["*/10 12-23 * * *", "*/10 0-2 * * *"]
+crons = ["*/10 12-23 * * *", "*/10 0-3 * * *"]
 
 [observability]
 enabled = true
