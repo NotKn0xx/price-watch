@@ -433,11 +433,15 @@ def count_alerts_since(conn, hours=24) -> int:
     return row["n"] if row else 0
 
 
-def record_alert(conn, product_id, price, reason, store_id=None, url=None):
-    conn.execute(
+def record_alert(conn, product_id, price, reason, store_id=None, url=None, journal_profile=None):
+    cursor = conn.execute(
         "INSERT INTO alerts (product_id, price, reason, store_id, url) VALUES (?, ?, ?, ?, ?)",
         (product_id, price, reason, store_id, url),
     )
+    if journal_profile:
+        from reaplicar import guardar_alerta
+        stamp = conn.execute("SELECT sent_at FROM alerts WHERE id = ?", (cursor.lastrowid,)).fetchone()[0]
+        guardar_alerta(journal_profile, product_id, price, reason, store_id, url, stamp)
 
 
 def _chunks(seq, n):
