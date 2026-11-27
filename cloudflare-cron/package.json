@@ -2,8 +2,10 @@
   "name": "price-watch-cron",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "Dispara el escaneo de price-watch cada 10 min via repository_dispatch.",
   "scripts": {
+    "test": "node --test",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev --test-scheduled",
     "tail": "wrangler tail"
